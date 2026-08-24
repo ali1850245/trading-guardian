@@ -21,6 +21,7 @@ jobs:
       - name: Validate engine
         run: python -m py_compile engine.py bot.py
       - name: Start Telegram bot
+        if: ${{ secrets.TELEGRAM_BOT_TOKEN != '' }}
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -28,3 +29,6 @@ jobs:
           SYMBOL: ${{ secrets.SYMBOL }}
           OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
         run: python bot.py
+      - name: Explain missing Telegram token
+        if: ${{ secrets.TELEGRAM_BOT_TOKEN == '' }}
+        run: echo "TELEGRAM_BOT_TOKEN is not configured; Telegram bot start was skipped."
