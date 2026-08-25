@@ -14,20 +14,11 @@ from engine import get_signal_snapshot, review_with_ai, save_event
 load_dotenv()
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-# Never silently join pieces of a malformed token: an accidental newline/space
-# inside the token can produce Telegram InvalidURL errors. Ask for it again.
 if TOKEN and any(ch.isspace() or ord(ch) < 32 or ord(ch) > 126 for ch in TOKEN):
     TOKEN = ""
 
 if not TOKEN:
-    try:
-        from getpass import getpass
-        TOKEN = getpass("Telegram bot token: ").strip()
-    except Exception:
-        TOKEN = ""
-
-if not TOKEN:
-    raise RuntimeError("TELEGRAM_BOT_TOKEN is missing")
+    raise RuntimeError("TELEGRAM_BOT_TOKEN is missing. Configure it as a Codespaces environment variable or GitHub Actions secret.")
 
 OPENAI_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 ALLOWED_USERS = {x.strip() for x in os.getenv("TELEGRAM_ALLOWED_USER_IDS", "").split(",") if x.strip()}
