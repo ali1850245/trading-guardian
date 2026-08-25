@@ -13,7 +13,7 @@ from engine import get_signal_snapshot, review_with_ai, save_event
 
 load_dotenv()
 
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TOKEN = "".join(os.getenv("TELEGRAM_BOT_TOKEN", "").split())
 OPENAI_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 ALLOWED_USERS = {
     x.strip() for x in os.getenv("TELEGRAM_ALLOWED_USER_IDS", "").split(",") if x.strip()
@@ -59,7 +59,6 @@ def format_signal(s):
 
 
 async def safe_reply(message, text, **kwargs):
-    # Telegram messages are limited to 4096 characters.
     if len(text) <= 4000:
         await message.reply_text(text, **kwargs)
         return
