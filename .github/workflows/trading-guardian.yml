@@ -19,17 +19,52 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+
       - name: Install dependencies
         run: pip install -r requirements.txt
-      - name: Validate engine
+
+      - name: Validate Python files
         run: python -m py_compile engine.py bot.py
+
+      - name: Validate Telegram token configuration
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "ERROR: TELEGRAM_BOT_TOKEN GitHub secret is missing."
+            exit 1
+          fi
+          python - <<'PY'
+          import os
+          token = os.environ["TOKEN"].strip()
+          if any(ord(c) < 32 or ord(c) > 126 or c.isspace() for c in token):
+              raise SystemExit("ERROR: TELEGRAM_BOT_TOKEN contains invalid characters.")
+          parts = token.split(":", 1)
+          if len(parts) != 2 or not parts[0].isdigit() or len(parts[1]) < 20:
+              raise SystemExit("ERROR: TELEGRAM_BOT_TOKEN format is invalid.")
+          print("TELEGRAM_BOT_TOKEN is configured and has a valid format.")
+          PY
+
+      - name: Validate OpenAI configuration
+        env:
+          KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "WARNING: OPENAI_API_KEY is missing; AI review will be unavailable."
+          else
+            echo "OPENAI_API_KEY is configured."
+          fi
+
       - name: Start Telegram bot
-        if: ${{ env.TELEGRAM_BOT_TOKEN != '' }}
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          TELEGRAM_ALLOWED_USER_IDS: ${{ secrets.TELEGRAM_ALLOWED_USER_IDS }}
+          SYMBOL: ${{ secrets.SYMBOL }}
+          OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
         run: python bot.py
-      - name: Explain missing Telegram token
-        if: ${{ env.TELEGRAM_BOT_TOKEN == '' }}
-        run: echo "TELEGRAM_BOT_TOKEN is not configured; Telegram bot start was skipped."
