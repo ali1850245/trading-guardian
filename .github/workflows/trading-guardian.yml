@@ -31,24 +31,37 @@ jobs:
       - name: Validate Python files
         run: python -m py_compile engine.py bot.py
 
-      - name: Validate Telegram token configuration
+      - name: Validate and normalize Telegram token
         env:
           TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         run: |
-          if [ -z "$TOKEN" ]; then
-            echo "ERROR: TELEGRAM_BOT_TOKEN GitHub secret is missing."
-            exit 1
-          fi
           python - <<'PY'
           import os
-          token = os.environ["TOKEN"].strip()
-          if any(ord(c) < 32 or ord(c) > 126 or c.isspace() for c in token):
-              raise SystemExit("ERROR: TELEGRAM_BOT_TOKEN contains invalid characters.")
+          from pathlib import Path
+
+          token = os.environ.get("TOKEN", "").strip()
+          if not token:
+              raise SystemExit("ERROR: TELEGRAM_BOT_TOKEN GitHub secret is missing.")
+
+          # Accept common accidental formatting when a token was pasted with
+          # quotes, a variable name, or line breaks.
+          if token.startswith("TELEGRAM_BOT_TOKEN="):
+              token = token.split("=", 1)[1].strip()
+          if len(token) >= 2 and token[0] == token[-1] and token[0] in "'\"":
+              token = token[1:-1].strip()
+          token = "".join(token.split())
+
           parts = token.split(":", 1)
           if len(parts) != 2 or not parts[0].isdigit() or len(parts[1]) < 20:
               raise SystemExit("ERROR: TELEGRAM_BOT_TOKEN format is invalid.")
-          print("TELEGRAM_BOT_TOKEN is configured and has a valid format.")
+
+          Path("/tmp/telegram_token").write_text(token, encoding="utf-8")
+          print("TELEGRAM_BOT_TOKEN format accepted after normalization.")
           PY
+
+      - name: Prepare Telegram token
+        run: |
+          echo "TELEGRAM_BOT_TOKEN=$(cat /tmp/telegram_token)" >> "$GITHUB_ENV"
 
       - name: Validate OpenAI configuration
         env:
@@ -62,7 +75,6 @@ jobs:
 
       - name: Start Telegram bot
         env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           TELEGRAM_ALLOWED_USER_IDS: ${{ secrets.TELEGRAM_ALLOWED_USER_IDS }}
           SYMBOL: ${{ secrets.SYMBOL }}
