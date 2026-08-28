@@ -19,6 +19,8 @@ if not TOKEN:
 
 OPENAI_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 ALLOWED_USERS = {x.strip() for x in os.getenv("TELEGRAM_ALLOWED_USER_IDS", "").split(",") if x.strip()}
+MONITOR_CHAT_ID = os.getenv("TELEGRAM_MONITOR_CHAT_ID", "").strip()
+MONITOR_INTERVAL = max(30, int(os.getenv("MONITOR_INTERVAL_SECONDS", "60")))
 client = OpenAI(api_key=OPENAI_KEY) if OPENAI_KEY else None
 
 
@@ -34,6 +36,7 @@ def keyboard():
         [InlineKeyboardButton("📊 Signal", callback_data="signal")],
         [InlineKeyboardButton("🤖 AI Review", callback_data="review")],
         [InlineKeyboardButton("📈 Paper Stats", callback_data="stats")],
+        [InlineKeyboardButton("🛡️ Safety", callback_data="safety")],
     ])
 
 
@@ -83,7 +86,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not authorized(update):
         return await update.message.reply_text("Unauthorized")
     await update.message.reply_text(
-        "Trading Guardian — PAPER TRADING.\nسیگنال، Entry، حد ضرر و Target از داده بازار محاسبه می‌شوند.",
+        "🛡️ ChatGPT Trading Guardian — PAPER TRADING\n"
+        "مانیتورینگ خودکار: فعال\n"
+        "معامله واقعی: غیرفعال\n"
+        "برداشت: غیرفعال\n\n"
+        "سیگنال، Entry، حد ضرر و Target از داده بازار محاسبه می‌شوند.",
         reply_markup=keyboard(),
     )
 
@@ -132,16 +139,78 @@ async def review(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await target.reply_text(f"⚠️ خطا در بررسی AI: {exc}", reply_markup=keyboard())
 
 
+async def safety(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not authorized(update):
+        return
+    target = update.callback_query.message if update.callback_query else update.message
+    if update.callback_query:
+        await update.callback_query.answer()
+    await target.reply_text(
+        "🛡️ Safety Status\n\n"
+        "حالت: PAPER TRADING\n"
+        "سفارش واقعی: خاموش\n"
+        "برداشت وجه: متصل نیست\n"
+        "اصلاح خودکار کد: خاموش\n"
+        "AI: فقط بررسی/پیشنهاد؛ تغییر مستقیم نسخه فعال ممنوع",
+        reply_markup=keyboard(),
+    )
+
+
+async def monitor_loop(app: Application):
+    if not MONITOR_CHAT_ID:
+        return
+    last_decision = None
+    last_signature = None
+    while True:
+        try:
+            snapshot = await asyncio.to_thread(get_signal_snapshot)
+            decision = snapshot.get("decision", "NO TRADE")
+            signature = (
+                decision,
+                snapshot.get("entry"),
+                snapshot.get("stop"),
+                snapshot.get("tp1"),
+                snapshot.get("tp2"),
+            )
+            # Notify only when an actionable signal appears or its scenario changes.
+            if decision != "NO TRADE" and signature != last_signature:
+                await app.bot.send_message(chat_id=MONITOR_CHAT_ID, text=format_signal(snapshot), reply_markup=keyboard())
+            elif last_decision in {"LONG", "SHORT"} and decision != last_decision:
+                await app.bot.send_message(
+                    chat_id=MONITOR_CHAT_ID,
+                    text=f"⚠️ تغییر سناریو\nسناریوی قبلی: {last_decision}\nسناریوی فعلی: {decision}",
+                    reply_markup=keyboard(),
+                )
+            last_decision = decision
+            last_signature = signature
+            save_event("monitor_tick", snapshot)
+        except Exception as exc:
+            save_event("monitor_error", {"error": str(exc)})
+            try:
+                await app.bot.send_message(chat_id=MONITOR_CHAT_ID, text=f"⚠️ خطای مانیتورینگ: {exc}")
+            except Exception:
+                pass
+        await asyncio.sleep(MONITOR_INTERVAL)
+
+
+async def post_init(app: Application):
+    app.create_task(monitor_loop(app), name="market-monitor")
+
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not authorized(update):
         return
     await update.message.reply_text(
-        "/start — منوی اصلی\n/signal — دریافت سیگنال و تارگت‌ها\n/stats — آمار Paper Trading\n/help — راهنما\n\nحالت اجرا: Paper Trading؛ سفارش واقعی خودکار فعال نیست."
+        "/start — منوی اصلی\n"
+        "/signal — دریافت سیگنال و تارگت‌ها\n"
+        "/stats — آمار Paper Trading\n"
+        "/help — راهنما\n\n"
+        "حالت اجرا: Paper Trading؛ سفارش واقعی خودکار فعال نیست."
     )
 
 
 def main():
-    app = Application.builder().token(TOKEN).build()
+    app = Application.builder().token(TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("signal", signal))
     app.add_handler(CommandHandler("stats", stats))
@@ -149,6 +218,7 @@ def main():
     app.add_handler(CallbackQueryHandler(signal, pattern="^signal$"))
     app.add_handler(CallbackQueryHandler(review, pattern="^review$"))
     app.add_handler(CallbackQueryHandler(stats, pattern="^stats$"))
+    app.add_handler(CallbackQueryHandler(safety, pattern="^safety$"))
     app.run_polling(drop_pending_updates=True)
 
 
