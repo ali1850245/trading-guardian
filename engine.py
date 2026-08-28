@@ -40,7 +40,7 @@ def api_get(path, params=None, timeout=15):
         BASE_URL + path,
         params=params or {},
         timeout=timeout,
-        headers={"User-Agent": "TradingGuardian/1.1", "Accept": "application/json"},
+        headers={"User-Agent": "TradingGuardian/1.2", "Accept": "application/json"},
     )
     r.raise_for_status()
     return r.json()
@@ -112,8 +112,8 @@ def wallex_candles(symbol=DEFAULT_SYMBOL, resolution="15", limit=300):
         raise RuntimeError(str(data))
     keys = ["t", "o", "h", "l", "c", "v"]
     n = min(len(data.get(k, [])) for k in keys)
-    if n < 50:
-        raise RuntimeError("Not enough candles")
+    if n < 220:
+        raise RuntimeError("Not enough candles for EMA200")
     df = pd.DataFrame({"timestamp": data["t"][:n], "open": data["o"][:n], "high": data["h"][:n], "low": data["l"][:n], "close": data["c"][:n], "volume": data["v"][:n]})
     for col in ["open", "high", "low", "close", "volume"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -177,22 +177,46 @@ def timeframe_score(df):
 
 def build_signal(symbol, market, depth, trades, analyses):
     weights = {"5m": 1, "15m": 2, "1h": 3, "4h": 4}
-    total = sum(a.get("score", 0) * weights.get(tf, 1) for tf, a in analyses.items() if isinstance(a, dict))
-    total += 1 if safe_float(depth.get("imbalance")) > 0.15 else -1 if safe_float(depth.get("imbalance")) < -0.15 else 0
-    total += 1 if safe_float(trades.get("buy_ratio"), 0.5) > 0.58 else -1 if safe_float(trades.get("buy_ratio"), 0.5) < 0.42 else 0
+    valid = {tf: a for tf, a in analyses.items() if isinstance(a, dict) and "error" not in a and safe_float(a.get("atr")) > 0}
+    missing = sorted(set(TIMEFRAMES) - set(valid))
     price = safe_float(market.get("last"))
     if not price:
-        return {"symbol": symbol, "price": 0, "decision": "NO TRADE", "confidence": 0, "entry": None, "stop": None, "tp1": None, "tp2": None, "reason": market.get("error", "قیمت دریافت نشد"), "invalidation": "—"}
+        return {"symbol": symbol, "price": 0, "decision": "NO TRADE", "confidence": 0, "entry": None, "stop": None, "tp1": None, "tp2": None, "score": 0, "reason": market.get("error", "قیمت دریافت نشد"), "invalidation": "—"}
+    if len(valid) < 3:
+        return {"symbol": symbol, "price": price, "decision": "NO TRADE", "confidence": 0, "entry": None, "stop": None, "tp1": None, "tp2": None, "score": 0, "reason": "داده کافی نیست؛ تایم‌فریم ناقص: " + ", ".join(missing), "invalidation": "—", "timeframes": analyses}
+
+    total = sum(a.get("score", 0) * weights.get(tf, 1) for tf, a in valid.items())
+    imbalance = safe_float(depth.get("imbalance"))
+    buy_ratio = safe_float(trades.get("buy_ratio"), 0.5)
+    total += 1 if imbalance > 0.15 else -1 if imbalance < -0.15 else 0
+    total += 1 if buy_ratio > 0.58 else -1 if buy_ratio < 0.42 else 0
+
+    spread_pct = safe_float(depth.get("spread_pct"))
+    max_spread = safe_float(os.getenv("MAX_SPREAD_PCT"), 0.5)
+    if spread_pct > max_spread:
+        return {"symbol": symbol, "price": price, "decision": "NO TRADE", "confidence": 0, "entry": None, "stop": None, "tp1": None, "tp2": None, "score": total, "reason": f"اسپرد زیاد است ({spread_pct:.3f}%)", "invalidation": "—", "timeframes": analyses}
+
     decision = "LONG" if total >= 6 else "SHORT" if total <= -6 else "NO TRADE"
-    confidence = min(99, int(abs(total) * 5))
-    atr_value = safe_float(analyses.get("15m", {}).get("atr")) or price * 0.005
+    confidence = min(99, int(abs(total) / 17 * 100))
+    atr_value = safe_float(valid.get("15m", next(iter(valid.values()))).get("atr")) or price * 0.005
     entry = stop = tp1 = tp2 = None
     if decision == "LONG":
-        entry = price; stop = entry - 1.5 * atr_value; risk = entry - stop; tp1 = entry + 1.5 * risk; tp2 = entry + 2.5 * risk
+        entry = price
+        stop = entry - 1.5 * atr_value
+        risk = entry - stop
+        tp1 = entry + 1.5 * risk
+        tp2 = entry + 2.5 * risk
     elif decision == "SHORT":
-        entry = price; stop = entry + 1.5 * atr_value; risk = stop - entry; tp1 = entry - 1.5 * risk; tp2 = entry - 2.5 * risk
-    reasons = [r for a in analyses.values() if isinstance(a, dict) for r in a.get("reasons", [])]
-    return {"symbol": symbol, "decision": decision, "confidence": confidence, "entry": round(entry, 4) if entry else None, "stop": round(stop, 4) if stop else None, "tp1": round(tp1, 4) if tp1 else None, "tp2": round(tp2, 4) if tp2 else None, "score": total, "price": price, "reason": "؛ ".join(reasons[:10]) or "شرایط کافی نیست", "invalidation": "عبور از SL" if decision != "NO TRADE" else "—", "market": market, "orderbook": depth, "recent_trades": trades, "timeframes": analyses, "generated_at": now_utc()}
+        entry = price
+        stop = entry + 1.5 * atr_value
+        risk = stop - entry
+        tp1 = entry - 1.5 * risk
+        tp2 = entry - 2.5 * risk
+
+    reasons = [r for a in valid.values() for r in a.get("reasons", [])]
+    rr1 = 1.5 if decision != "NO TRADE" else None
+    rr2 = 2.5 if decision != "NO TRADE" else None
+    return {"symbol": symbol, "decision": decision, "confidence": confidence, "entry": round(entry, 4) if entry else None, "stop": round(stop, 4) if stop else None, "tp1": round(tp1, 4) if tp1 else None, "tp2": round(tp2, 4) if tp2 else None, "score": total, "price": price, "risk_reward_tp1": rr1, "risk_reward_tp2": rr2, "reason": "؛ ".join(reasons[:10]) or "شرایط کافی نیست", "invalidation": "عبور از SL" if decision != "NO TRADE" else "—", "market": market, "orderbook": depth, "recent_trades": trades, "timeframes": analyses, "generated_at": now_utc()}
 
 
 def get_signal_snapshot(symbol=DEFAULT_SYMBOL):
@@ -214,6 +238,43 @@ def get_signal_snapshot(symbol=DEFAULT_SYMBOL):
         result = {"symbol": symbol, "price": 0, "decision": "NO TRADE", "confidence": 0, "entry": None, "stop": None, "tp1": None, "tp2": None, "reason": f"خطای موتور: {exc}", "invalidation": "—"}
         save_event("engine_error", result)
         return result
+
+
+def paper_result(signal, high, low):
+    """Evaluate a completed candle/range against a generated signal without placing orders."""
+    if signal.get("decision") == "LONG":
+        if safe_float(low) <= safe_float(signal.get("stop")):
+            return "STOP"
+        if safe_float(high) >= safe_float(signal.get("tp2")):
+            return "TP2"
+        if safe_float(high) >= safe_float(signal.get("tp1")):
+            return "TP1"
+    elif signal.get("decision") == "SHORT":
+        if safe_float(high) >= safe_float(signal.get("stop")):
+            return "STOP"
+        if safe_float(low) <= safe_float(signal.get("tp2")):
+            return "TP2"
+        if safe_float(low) <= safe_float(signal.get("tp1")):
+            return "TP1"
+    return "OPEN"
+
+
+def paper_stats():
+    if not JOURNAL.exists():
+        return {"closed": 0, "wins": 0, "stops": 0, "win_rate": 0.0}
+    closed = wins = stops = 0
+    with JOURNAL.open("r", encoding="utf-8") as f:
+        for line in f:
+            try:
+                item = json.loads(line)
+                result = item.get("payload", {}).get("result") if item.get("event") == "paper_result" else None
+                if result in {"TP1", "TP2", "STOP"}:
+                    closed += 1
+                    wins += result in {"TP1", "TP2"}
+                    stops += result == "STOP"
+            except (json.JSONDecodeError, TypeError):
+                continue
+    return {"closed": closed, "wins": wins, "stops": stops, "win_rate": round(wins / closed * 100, 2) if closed else 0.0}
 
 
 def review_with_ai(client, snapshot):
