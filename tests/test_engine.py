@@ -10,8 +10,8 @@ class BuildSignalTests(unittest.TestCase):
     def market(self):
         return {"last": 10000}
 
-    def depth(self, imbalance=0.0):
-        return {"imbalance": imbalance, "spread_pct": 0.1}
+    def depth(self, imbalance=0.0, spread_pct=0.1):
+        return {"imbalance": imbalance, "spread_pct": spread_pct}
 
     def test_long_has_targets_and_valid_risk_reward(self):
         analyses = {tf: self.analysis(2, 100) for tf in ("5m", "15m", "1h", "4h")}
@@ -72,6 +72,12 @@ class PaperResultTests(unittest.TestCase):
 
     def test_short_tp1(self):
         self.assertEqual(paper_result(self.short_signal(), 10000, 9700), "TP1")
+
+    def test_no_trade_is_open(self):
+        self.assertEqual(paper_result({"decision": "NO TRADE"}, 20000, 1), "OPEN")
+
+    def test_long_open_when_neither_level_is_touched(self):
+        self.assertEqual(paper_result(self.long_signal(), 10100, 9900), "OPEN")
 
 
 if __name__ == "__main__":
