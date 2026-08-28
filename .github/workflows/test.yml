@@ -28,6 +28,9 @@ jobs:
       - name: Compile Python files
         run: python -m compileall -q .
 
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
+
       - name: Verify imports
         env:
           TELEGRAM_BOT_TOKEN: test-token
