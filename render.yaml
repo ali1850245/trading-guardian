@@ -1,0 +1,23 @@
+services:
+  - type: worker
+    name: trading-guardian
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL
+        value: gpt-5-mini
+      - key: TELEGRAM_ALLOWED_USER_IDS
+        sync: false
+      - key: TELEGRAM_MONITOR_CHAT_ID
+        sync: false
+      - key: MONITOR_INTERVAL_SECONDS
+        value: "60"
+      - key: SYMBOLS
+        value: "BTCUSDT,ETHUSDT,SOLUSDT"
+      - key: MODE
+        value: "paper"
