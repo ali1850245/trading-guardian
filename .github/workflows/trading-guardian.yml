@@ -6,7 +6,7 @@ on:
     branches: [main]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   test:
@@ -23,60 +23,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-
-      - name: Remove deprecated 2-day timeframe
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          import re
-
-          path = Path('engine.py')
-          text = path.read_text(encoding='utf-8')
-          original = text
-
-          # Replace the timeframe registry with the approved 7-frame hierarchy.
-          block = '''TIMEFRAMES = {
-              "5m": {"resolution": "5", "minutes": 5, "weight": 1, "role": "trigger"},
-              "10m": {"resolution": "10", "minutes": 10, "weight": 2, "role": "trigger"},
-              "15m": {"resolution": "15", "minutes": 15, "weight": 2, "role": "setup"},
-              "30m": {"resolution": "30", "minutes": 30, "weight": 3, "role": "setup"},
-              "1h": {"resolution": "60", "minutes": 60, "weight": 4, "role": "structure"},
-              "4h": {"resolution": "240", "minutes": 240, "weight": 5, "role": "structure"},
-              "1d": {"resolution": "1D", "minutes": 1440, "weight": 6, "role": "macro"},
-          }'''
-          text, count = re.subn(r'TIMEFRAMES = \{.*?\n\}', block, text, count=1, flags=re.DOTALL)
-          if count != 1:
-              raise SystemExit('TIMEFRAMES block not found')
-
-          # Remove the synthetic 2-day aggregation helper.
-          text = re.sub(r'\n\ndef _aggregate_2d\(frame\):.*?\n\ndef get_candles', '\n\ndef get_candles', text, count=1, flags=re.DOTALL)
-
-          text = text.replace('resolution = str(resolution); is_2d = resolution.upper() == "2D"', 'resolution = str(resolution)')
-          text = text.replace('fetch_limit = min(max(limit * 2 if is_2d else limit, MIN_CANDLES), 1000)', 'fetch_limit = min(max(limit, MIN_CANDLES), 1000)')
-          text = text.replace('        if is_2d: frame = _aggregate_2d(frame)\n', '')
-          text = text.replace('    # Wallex fallback for intervals it can serve. 2d is built from daily candles when possible.\n', '    # Wallex fallback for intervals it can serve.\n')
-          text = text.replace('        wallex_res = "D" if resolution == "1D" else ("D" if is_2d else resolution)', '        wallex_res = "D" if resolution == "1D" else resolution')
-          text = text.replace('        minutes = 2880 if is_2d else TIMEFRAMES.get(resolution, {}).get("minutes", 15)', '        minutes = TIMEFRAMES.get(resolution, {}).get("minutes", 15)')
-
-          # Any direct 2-day macro lookup is removed; 1d remains the macro frame.
-          text = re.sub(r'\n[^\n]*["\']2d["\'][^\n]*', '', text, flags=re.IGNORECASE)
-
-          if '"2d"' in text.lower() or 'is_2d' in text or '_aggregate_2d' in text:
-              raise SystemExit('2-day timeframe cleanup incomplete')
-
-          if text != original:
-              path.write_text(text, encoding='utf-8')
-          PY
-
-          if git diff --quiet -- engine.py; then
-            echo "No 2-day timeframe changes needed."
-          else
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add engine.py
-            git commit -m "Remove deprecated 2-day timeframe"
-            git push
-          fi
 
       - name: Install dependencies
         run: pip install -r requirements.txt
