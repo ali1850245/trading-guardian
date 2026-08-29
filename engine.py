@@ -270,6 +270,7 @@ def build_signal(symbol,market,depth,trades,derivatives,analyses):
     if decision=="SHORT" and (trigger_avg>1 or setup_avg>1): decision="NO TRADE"
     if safe_float(depth.get("spread_pct"),999)>MAX_SPREAD_PCT: decision="NO TRADE"
     alignment_parts=[]
+    for name in ("1d","4h","1h","30m","15m","10m","5m"):
         if name in valid: alignment_parts.append(_direction(valid[name]["score"],2))
     aligned=sum(1 for x in alignment_parts if x!=0 and x==(1 if decision=="LONG" else -1 if decision=="SHORT" else 0))
     confidence=0 if decision=="NO TRADE" else min(95,int((abs(weighted)/5)*65 + aligned/max(len(alignment_parts),1)*35))
