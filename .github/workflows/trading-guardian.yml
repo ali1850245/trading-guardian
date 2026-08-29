@@ -34,8 +34,23 @@ jobs:
           text = path.read_text(encoding='utf-8')
           original = text
 
-          text = re.sub(r'^\s*"2d": \{"resolution": "2D", "minutes": 2880, "weight": 7, "role": "macro"\},\n', '', text, flags=re.MULTILINE)
-          text = re.sub(r'\n\ndef _aggregate_2d\(frame\):.*?\n\n(?=def get_candles)', '\n\n', text, flags=re.DOTALL)
+          # Replace the timeframe registry with the approved 7-frame hierarchy.
+          block = '''TIMEFRAMES = {
+              "5m": {"resolution": "5", "minutes": 5, "weight": 1, "role": "trigger"},
+              "10m": {"resolution": "10", "minutes": 10, "weight": 2, "role": "trigger"},
+              "15m": {"resolution": "15", "minutes": 15, "weight": 2, "role": "setup"},
+              "30m": {"resolution": "30", "minutes": 30, "weight": 3, "role": "setup"},
+              "1h": {"resolution": "60", "minutes": 60, "weight": 4, "role": "structure"},
+              "4h": {"resolution": "240", "minutes": 240, "weight": 5, "role": "structure"},
+              "1d": {"resolution": "1D", "minutes": 1440, "weight": 6, "role": "macro"},
+          }'''
+          text, count = re.subn(r'TIMEFRAMES = \{.*?\n\}', block, text, count=1, flags=re.DOTALL)
+          if count != 1:
+              raise SystemExit('TIMEFRAMES block not found')
+
+          # Remove the synthetic 2-day aggregation helper.
+          text = re.sub(r'\n\ndef _aggregate_2d\(frame\):.*?\n\ndef get_candles', '\n\ndef get_candles', text, count=1, flags=re.DOTALL)
+
           text = text.replace('resolution = str(resolution); is_2d = resolution.upper() == "2D"', 'resolution = str(resolution)')
           text = text.replace('fetch_limit = min(max(limit * 2 if is_2d else limit, MIN_CANDLES), 1000)', 'fetch_limit = min(max(limit, MIN_CANDLES), 1000)')
           text = text.replace('        if is_2d: frame = _aggregate_2d(frame)\n', '')
@@ -43,7 +58,10 @@ jobs:
           text = text.replace('        wallex_res = "D" if resolution == "1D" else ("D" if is_2d else resolution)', '        wallex_res = "D" if resolution == "1D" else resolution')
           text = text.replace('        minutes = 2880 if is_2d else TIMEFRAMES.get(resolution, {}).get("minutes", 15)', '        minutes = TIMEFRAMES.get(resolution, {}).get("minutes", 15)')
 
-          if '"2d"' in text or '"2D"' in text or 'is_2d' in text or '_aggregate_2d' in text:
+          # Any direct 2-day macro lookup is removed; 1d remains the macro frame.
+          text = re.sub(r'\n[^\n]*["\']2d["\'][^\n]*', '', text, flags=re.IGNORECASE)
+
+          if '"2d"' in text.lower() or 'is_2d' in text or '_aggregate_2d' in text:
               raise SystemExit('2-day timeframe cleanup incomplete')
 
           if text != original:
