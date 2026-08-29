@@ -145,15 +145,20 @@ async def help_cmd(update,context):
 
 async def monitor_loop(app):
     if not MONITOR_CHAT_ID: return
-    last=None
+    # Keep independent last-sent signatures per symbol; otherwise BTC/ETH/SOL
+    # would continuously look "changed" simply because another symbol ran next.
+    last_by_symbol = {}
     while True:
         try:
             for symbol in SYMBOLS:
-                s=await asyncio.to_thread(get_signal_snapshot,symbol); sig=(symbol,s.get("decision"),s.get("entry"),s.get("stop"),s.get("tp1"))
-                if s.get("decision")!="NO TRADE" and sig!=last:
-                    await app.bot.send_message(chat_id=MONITOR_CHAT_ID,text=format_signal(s),reply_markup=kb_main()); last=sig
+                s=await asyncio.to_thread(get_signal_snapshot,symbol)
+                sig=(symbol,s.get("decision"),s.get("entry"),s.get("stop"),s.get("tp1"),s.get("tp2"),s.get("tp3"))
+                if s.get("decision")!="NO TRADE" and sig != last_by_symbol.get(symbol):
+                    await app.bot.send_message(chat_id=MONITOR_CHAT_ID,text=format_signal(s),reply_markup=kb_main())
+                    last_by_symbol[symbol] = sig
                 save_event("monitor_tick",s)
-        except Exception as e: save_event("monitor_error",{"error":str(e)})
+        except Exception as e:
+            save_event("monitor_error",{"error":str(e)})
         await asyncio.sleep(MONITOR_INTERVAL)
 
 async def post_init(app): app.create_task(monitor_loop(app),name="market-monitor")
