@@ -5,6 +5,9 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: write
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -20,6 +23,42 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+
+      - name: Remove deprecated 2-day timeframe
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path('engine.py')
+          text = path.read_text(encoding='utf-8')
+          original = text
+
+          text = re.sub(r'^\s*"2d": \{"resolution": "2D", "minutes": 2880, "weight": 7, "role": "macro"\},\n', '', text, flags=re.MULTILINE)
+          text = re.sub(r'\n\ndef _aggregate_2d\(frame\):.*?\n\n(?=def get_candles)', '\n\n', text, flags=re.DOTALL)
+          text = text.replace('resolution = str(resolution); is_2d = resolution.upper() == "2D"', 'resolution = str(resolution)')
+          text = text.replace('fetch_limit = min(max(limit * 2 if is_2d else limit, MIN_CANDLES), 1000)', 'fetch_limit = min(max(limit, MIN_CANDLES), 1000)')
+          text = text.replace('        if is_2d: frame = _aggregate_2d(frame)\n', '')
+          text = text.replace('    # Wallex fallback for intervals it can serve. 2d is built from daily candles when possible.\n', '    # Wallex fallback for intervals it can serve.\n')
+          text = text.replace('        wallex_res = "D" if resolution == "1D" else ("D" if is_2d else resolution)', '        wallex_res = "D" if resolution == "1D" else resolution')
+          text = text.replace('        minutes = 2880 if is_2d else TIMEFRAMES.get(resolution, {}).get("minutes", 15)', '        minutes = TIMEFRAMES.get(resolution, {}).get("minutes", 15)')
+
+          if '"2d"' in text or '"2D"' in text or 'is_2d' in text or '_aggregate_2d' in text:
+              raise SystemExit('2-day timeframe cleanup incomplete')
+
+          if text != original:
+              path.write_text(text, encoding='utf-8')
+          PY
+
+          if git diff --quiet -- engine.py; then
+            echo "No 2-day timeframe changes needed."
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add engine.py
+            git commit -m "Remove deprecated 2-day timeframe"
+            git push
+          fi
 
       - name: Install dependencies
         run: pip install -r requirements.txt
