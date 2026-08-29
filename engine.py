@@ -8,278 +8,207 @@ import numpy as np
 import pandas as pd
 import requests
 
-DATA = Path("data")
-DATA.mkdir(exist_ok=True)
-JOURNAL = DATA / "journal.jsonl"
-BASE_URL = "https://api.wallex.ir"
+DATA = Path(os.getenv("DATA_DIR", "data")); DATA.mkdir(parents=True, exist_ok=True)
+JOURNAL = DATA / "journal.jsonl"; PAPER_JOURNAL = DATA / "paper_trades.jsonl"
+WALLEX = os.getenv("WALLEX_BASE_URL", "https://api.wallex.ir")
+BINANCE = os.getenv("BINANCE_BASE_URL", "https://api.binance.com")
+FUTURES = os.getenv("BINANCE_FUTURES_URL", "https://fapi.binance.com")
 DEFAULT_SYMBOL = os.getenv("SYMBOL", "BTCUSDT")
-TIMEFRAMES = {"5m": "5", "15m": "15", "1h": "60", "4h": "240"}
+SYMBOLS = tuple(x.strip().upper() for x in os.getenv("SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT").split(",") if x.strip())
+TIMEFRAMES = {"5m":"5", "15m":"15", "1h":"60", "4h":"240"}
+WEIGHTS = {"5m":1, "15m":2, "1h":3, "4h":4}
+MAX_SPREAD_PCT = float(os.getenv("MAX_SPREAD_PCT", "0.50"))
+PAPER_START_BALANCE = float(os.getenv("PAPER_START_BALANCE", "10000"))
+DAILY_LOSS_LIMIT_PCT = float(os.getenv("DAILY_LOSS_LIMIT_PCT", "3"))
+TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "15"))
 
 
-def now_utc():
-    return datetime.now(timezone.utc).isoformat()
-
+def now_utc(): return datetime.now(timezone.utc).isoformat()
 
 def save_event(event, payload):
-    with JOURNAL.open("a", encoding="utf-8") as f:
-        f.write(json.dumps({"ts": now_utc(), "event": event, "payload": payload}, ensure_ascii=False) + "\n")
+    with JOURNAL.open("a", encoding="utf-8") as f: f.write(json.dumps({"ts":now_utc(),"event":event,"payload":payload},ensure_ascii=False)+"\n")
 
-
-def safe_float(value, default=0.0):
+def safe_float(v, default=0.0):
     try:
-        if value is None or value == "":
-            return default
-        value = float(value)
-        return value if np.isfinite(value) else default
-    except (TypeError, ValueError):
-        return default
+        if v is None or v == "": return default
+        v=float(v); return v if np.isfinite(v) else default
+    except (TypeError,ValueError): return default
 
-
-def api_get(path, params=None, timeout=15):
-    r = requests.get(
-        BASE_URL + path,
-        params=params or {},
-        timeout=timeout,
-        headers={"User-Agent": "TradingGuardian/1.2", "Accept": "application/json"},
-    )
-    r.raise_for_status()
-    return r.json()
-
+def api_get(base, path, params=None, retries=3):
+    err=None
+    for i in range(retries):
+        try:
+            r=requests.get(base+path,params=params or {},timeout=TIMEOUT,headers={"User-Agent":"TradingGuardian/3.0","Accept":"application/json"}); r.raise_for_status(); d=r.json()
+            if not isinstance(d,dict): raise RuntimeError("Invalid API response")
+            return d
+        except Exception as e:
+            err=e
+            if i<retries-1: time.sleep(i+1)
+    raise RuntimeError(f"API request failed: {err}")
 
 def wallex_snapshot(symbol=DEFAULT_SYMBOL):
     try:
-        data = api_get("/v1/markets")
-        item = data.get("result", {}).get("symbols", {}).get(symbol)
-        if not item:
-            return {"symbol": symbol, "error": f"Market {symbol} was not found on Wallex"}
-        stats = item.get("stats", {})
-        bid = safe_float(stats.get("bidPrice"))
-        ask = safe_float(stats.get("askPrice"))
-        last = safe_float(stats.get("lastPrice")) or ((bid + ask) / 2 if bid and ask else 0)
-        return {
-            "symbol": symbol, "bid": bid, "ask": ask, "last": last,
-            "volume24h": safe_float(stats.get("24h_volume")),
-            "quoteVolume24h": safe_float(stats.get("24h_quoteVolume")),
-            "change24h": safe_float(stats.get("24h_ch")),
-            "change7d": safe_float(stats.get("7d_ch")),
-            "high24h": safe_float(stats.get("24h_highPrice")),
-            "low24h": safe_float(stats.get("24h_lowPrice")),
-        }
-    except Exception as exc:
-        return {"symbol": symbol, "error": str(exc)}
+        d=api_get(WALLEX,"/v1/markets"); item=d.get("result",{}).get("symbols",{}).get(symbol)
+        if not item: return {"symbol":symbol,"error":f"Market {symbol} was not found on Wallex","source":"wallex"}
+        s=item.get("stats",{}); bid=safe_float(s.get("bidPrice")); ask=safe_float(s.get("askPrice")); last=safe_float(s.get("lastPrice")) or ((bid+ask)/2 if bid and ask else 0)
+        return {"symbol":symbol,"bid":bid,"ask":ask,"last":last,"volume24h":safe_float(s.get("24h_volume")),"quoteVolume24h":safe_float(s.get("24h_quoteVolume")),"change24h":safe_float(s.get("24h_ch")),"change7d":safe_float(s.get("7d_ch")),"high24h":safe_float(s.get("24h_highPrice")),"low24h":safe_float(s.get("24h_lowPrice")),"source":"wallex","received_at":now_utc()}
+    except Exception as e: return {"symbol":symbol,"error":str(e),"source":"wallex"}
 
-
-def wallex_depth(symbol=DEFAULT_SYMBOL):
+def binance_snapshot(symbol=DEFAULT_SYMBOL):
     try:
-        result = api_get("/v1/depth", {"symbol": symbol}).get("result", {})
-        bids, asks = result.get("bid", []), result.get("ask", [])
-        bid_notional = sum(safe_float(x.get("sum")) for x in bids[:20])
-        ask_notional = sum(safe_float(x.get("sum")) for x in asks[:20])
-        total = bid_notional + ask_notional
-        best_bid = safe_float(bids[0].get("price")) if bids else 0
-        best_ask = safe_float(asks[0].get("price")) if asks else 0
-        spread = best_ask - best_bid if best_bid and best_ask else 0
-        mid = (best_bid + best_ask) / 2 if best_bid and best_ask else 0
-        return {
-            "bid_notional_top20": bid_notional,
-            "ask_notional_top20": ask_notional,
-            "imbalance": (bid_notional - ask_notional) / total if total else 0,
-            "best_bid": best_bid,
-            "best_ask": best_ask,
-            "spread": spread,
-            "spread_pct": spread / mid * 100 if mid else 0,
-        }
-    except Exception as exc:
-        return {"error": str(exc)}
+        d=api_get(BINANCE,"/api/v3/ticker/24hr",{"symbol":symbol}); return {"symbol":symbol,"bid":safe_float(d.get("bidPrice")),"ask":safe_float(d.get("askPrice")),"last":safe_float(d.get("lastPrice")),"volume24h":safe_float(d.get("volume")),"quoteVolume24h":safe_float(d.get("quoteVolume")),"change24h":safe_float(d.get("priceChangePercent")),"high24h":safe_float(d.get("highPrice")),"low24h":safe_float(d.get("lowPrice")),"source":"binance","received_at":now_utc()}
+    except Exception as e: return {"symbol":symbol,"error":str(e),"source":"binance"}
 
+def market_snapshot(symbol=DEFAULT_SYMBOL):
+    w=wallex_snapshot(symbol)
+    return w if not w.get("error") and w.get("last") else binance_snapshot(symbol)
 
-def wallex_trades(symbol=DEFAULT_SYMBOL):
+def orderbook_snapshot(symbol=DEFAULT_SYMBOL):
     try:
-        trades = api_get("/v1/trades", {"symbol": symbol}).get("result", {}).get("latestTrades", [])
-        buy = sum(safe_float(t.get("quantity")) for t in trades if t.get("isBuyOrder"))
-        sell = sum(safe_float(t.get("quantity")) for t in trades if not t.get("isBuyOrder"))
-        total = buy + sell
-        return {"trade_count": len(trades), "buy_volume": buy, "sell_volume": sell, "buy_ratio": buy / total if total else 0.5}
-    except Exception as exc:
-        return {"error": str(exc), "buy_ratio": 0.5}
+        try:
+            r=api_get(WALLEX,"/v1/depth",{"symbol":symbol}).get("result",{}); bids,asks=r.get("bid",[]),r.get("ask",[])
+            if bids and asks:
+                bn=sum(safe_float(x.get("sum")) for x in bids[:20]); an=sum(safe_float(x.get("sum")) for x in asks[:20]); bb=safe_float(bids[0].get("price")); ba=safe_float(asks[0].get("price")); total=bn+an; mid=(bb+ba)/2; sp=ba-bb
+                return {"bid_notional_top20":bn,"ask_notional_top20":an,"imbalance":(bn-an)/total if total else 0,"best_bid":bb,"best_ask":ba,"spread":sp,"spread_pct":sp/mid*100 if mid else 0,"source":"wallex"}
+        except Exception: pass
+        d=api_get(BINANCE,"/api/v3/depth",{"symbol":symbol,"limit":20}); bids,asks=d.get("bids",[]),d.get("asks",[]); bn=sum(safe_float(x[0])*safe_float(x[1]) for x in bids); an=sum(safe_float(x[0])*safe_float(x[1]) for x in asks); bb,ba=safe_float(bids[0][0]),safe_float(asks[0][0]); mid=(bb+ba)/2; sp=ba-bb; total=bn+an
+        return {"bid_notional_top20":bn,"ask_notional_top20":an,"imbalance":(bn-an)/total if total else 0,"best_bid":bb,"best_ask":ba,"spread":sp,"spread_pct":sp/mid*100 if mid else 0,"source":"binance"}
+    except Exception as e: return {"error":str(e),"imbalance":0,"spread_pct":999}
 
+def recent_trades(symbol=DEFAULT_SYMBOL):
+    try:
+        d=api_get(BINANCE,"/api/v3/trades",{"symbol":symbol,"limit":100}); buy=sum(safe_float(x.get("qty")) for x in d if not x.get("isBuyerMaker")); sell=sum(safe_float(x.get("qty")) for x in d if x.get("isBuyerMaker")); total=buy+sell
+        return {"trade_count":len(d),"buy_volume":buy,"sell_volume":sell,"buy_ratio":buy/total if total else .5,"source":"binance"}
+    except Exception as e: return {"error":str(e),"buy_ratio":.5}
 
-def wallex_candles(symbol=DEFAULT_SYMBOL, resolution="15", limit=300):
-    end = int(time.time())
-    start = end - int(resolution) * 60 * limit
-    data = api_get("/v1/udf/history", {"symbol": symbol, "resolution": resolution, "from": start, "to": end})
-    if data.get("s") != "ok":
-        raise RuntimeError(str(data))
-    keys = ["t", "o", "h", "l", "c", "v"]
-    n = min(len(data.get(k, [])) for k in keys)
-    if n < 220:
-        raise RuntimeError("Not enough candles for EMA200")
-    df = pd.DataFrame({"timestamp": data["t"][:n], "open": data["o"][:n], "high": data["h"][:n], "low": data["l"][:n], "close": data["c"][:n], "volume": data["v"][:n]})
-    for col in ["open", "high", "low", "close", "volume"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-    return df.dropna().reset_index(drop=True)
+def get_candles(symbol=DEFAULT_SYMBOL,resolution="15",limit=300):
+    interval={"5":"5m","15":"15m","60":"1h","240":"4h"}.get(str(resolution),"15m")
+    try:
+        d=api_get(BINANCE,"/api/v3/klines",{"symbol":symbol,"interval":interval,"limit":min(limit,1000)})
+        if len(d)<220: raise RuntimeError("Not enough candles for EMA200")
+        f=pd.DataFrame(d,columns=["timestamp","open","high","low","close","volume","close_time","quote_volume","trades","taker_base","taker_quote","ignore"]); f["timestamp"]=f["timestamp"]//1000
+        for c in ["open","high","low","close","volume"]: f[c]=pd.to_numeric(f[c],errors="coerce")
+        return f[["timestamp","open","high","low","close","volume"]].replace([np.inf,-np.inf],np.nan).dropna().reset_index(drop=True)
+    except Exception:
+        d=api_get(WALLEX,"/v1/udf/history",{"symbol":symbol,"resolution":resolution,"from":int(time.time())-int(resolution)*60*limit,"to":int(time.time())})
+        if d.get("s")!="ok": raise RuntimeError(str(d))
+        keys=["t","o","h","l","c","v"]; n=min(len(d.get(k,[])) for k in keys)
+        if n<220: raise RuntimeError("Not enough candles for EMA200")
+        f=pd.DataFrame({"timestamp":d["t"][:n],"open":d["o"][:n],"high":d["h"][:n],"low":d["l"][:n],"close":d["c"][:n],"volume":d["v"][:n]})
+        for c in ["open","high","low","close","volume"]: f[c]=pd.to_numeric(f[c],errors="coerce")
+        return f.replace([np.inf,-np.inf],np.nan).dropna().reset_index(drop=True)
 
+def wallex_candles(symbol=DEFAULT_SYMBOL,resolution="15",limit=300): return get_candles(symbol,resolution,limit)
 
-def ema(s, period):
-    return s.ewm(span=period, adjust=False).mean()
-
-
-def rsi(s, period=14):
-    delta = s.diff()
-    gain = delta.clip(lower=0).ewm(alpha=1 / period, adjust=False).mean()
-    loss = (-delta.clip(upper=0)).ewm(alpha=1 / period, adjust=False).mean()
-    rs = gain / loss.replace(0, np.nan)
-    return (100 - 100 / (1 + rs)).fillna(50)
-
-
-def atr(df, period=14):
-    prev = df.close.shift(1)
-    tr = pd.concat([(df.high - df.low), (df.high - prev).abs(), (df.low - prev).abs()], axis=1).max(axis=1)
-    return tr.ewm(alpha=1 / period, adjust=False).mean()
-
-
-def indicators(df):
-    out = df.copy()
-    out["ema20"] = ema(out.close, 20)
-    out["ema50"] = ema(out.close, 50)
-    out["ema200"] = ema(out.close, 200)
-    out["rsi"] = rsi(out.close)
-    fast, slow = ema(out.close, 12), ema(out.close, 26)
-    out["macd"] = fast - slow
-    out["signal"] = ema(out.macd, 9)
-    out["hist"] = out.macd - out.signal
-    out["atr"] = atr(out)
-    out["vma"] = out.volume.rolling(20).mean()
-    out["vr"] = out.volume / out.vma.replace(0, np.nan)
+def derivatives_snapshot(symbol=DEFAULT_SYMBOL):
+    out={"source":"binance_futures","funding_rate":None,"open_interest":None,"liquidations_5m":None}
+    try: out["funding_rate"]=safe_float(api_get(FUTURES,"/fapi/v1/premiumIndex",{"symbol":symbol}).get("lastFundingRate"),None)
+    except Exception as e: out["funding_error"]=str(e)
+    try: out["open_interest"]=safe_float(api_get(FUTURES,"/fapi/v1/openInterest",{"symbol":symbol}).get("openInterest"),None)
+    except Exception as e: out["oi_error"]=str(e)
+    try:
+        rows=api_get(FUTURES,"/fapi/v1/allForceOrders",{"symbol":symbol,"limit":100}); cut=int(time.time()*1000)-300000; rows=[x for x in rows if safe_float(x.get("time"))>=cut]
+        out["liquidations_5m"]={"count":len(rows),"long":sum(safe_float(x.get("origQty")) for x in rows if x.get("side")=="SELL"),"short":sum(safe_float(x.get("origQty")) for x in rows if x.get("side")=="BUY")}
+    except Exception as e: out["liquidation_error"]=str(e)
     return out
 
+def ema(s,p): return s.ewm(span=p,adjust=False).mean()
+def rsi(s,p=14):
+    d=s.diff(); g=d.clip(lower=0).ewm(alpha=1/p,adjust=False).mean(); l=(-d.clip(upper=0)).ewm(alpha=1/p,adjust=False).mean(); rs=g/l.replace(0,np.nan); return (100-100/(1+rs)).fillna(50)
+def atr(df,p=14):
+    prev=df.close.shift(1); tr=pd.concat([df.high-df.low,(df.high-prev).abs(),(df.low-prev).abs()],axis=1).max(axis=1); return tr.ewm(alpha=1/p,adjust=False).mean()
+def indicators(df):
+    o=df.copy(); o["ema20"],o["ema50"],o["ema200"]=ema(o.close,20),ema(o.close,50),ema(o.close,200); o["rsi"]=rsi(o.close); fast,slow=ema(o.close,12),ema(o.close,26); o["macd"]=fast-slow; o["signal"]=ema(o.macd,9); o["hist"]=o.macd-o.signal; o["atr"]=atr(o); o["volume_ratio"]=o.volume/o.volume.rolling(20).mean().replace(0,np.nan); o["roc10"]=o.close.pct_change(10)*100; return o
 
-def timeframe_score(df):
-    x = indicators(df).iloc[-1]
-    score, reasons = 0, []
-    if x.close > x.ema20 > x.ema50 > x.ema200:
-        score += 3; reasons.append("روند صعودی")
-    elif x.close < x.ema20 < x.ema50 < x.ema200:
-        score -= 3; reasons.append("روند نزولی")
-    if x.rsi > 55:
-        score += 1; reasons.append("RSI مثبت")
-    elif x.rsi < 45:
-        score -= 1; reasons.append("RSI منفی")
-    if x.hist > 0:
-        score += 1; reasons.append("MACD مثبت")
-    elif x.hist < 0:
-        score -= 1; reasons.append("MACD منفی")
-    if safe_float(x.vr) > 1.2:
-        score += 1 if score > 0 else -1
-        reasons.append("حجم بالاتر از میانگین")
-    return {"score": int(score), "price": float(x.close), "rsi": round(float(x.rsi), 2), "atr": float(x.atr), "ema20": float(x.ema20), "ema50": float(x.ema50), "ema200": float(x.ema200), "macd": float(x.macd), "hist": float(x.hist), "volume_ratio": round(safe_float(x.vr, 1), 2), "reasons": reasons}
+def timeframe_analysis(df):
+    x=indicators(df).iloc[-2] if len(df)>1 else indicators(df).iloc[-1]; score=0; reasons=[]; bull=bear=0; close,e20,e50,e200=map(safe_float,[x.close,x.ema20,x.ema50,x.ema200]); rv,hist,vr,roc=safe_float(x.rsi,50),safe_float(x.hist),safe_float(x.volume_ratio,1),safe_float(x.roc10)
+    if close>e20>e50>e200: score+=4;bull+=1;reasons.append("ساختار روند صعودی")
+    elif close<e20<e50<e200: score-=4;bear+=1;reasons.append("ساختار روند نزولی")
+    else: reasons.append("روند کاملاً هم‌جهت نیست")
+    if e20>e50: score+=1;bull+=1;reasons.append("EMA20 بالاتر از EMA50")
+    elif e20<e50: score-=1;bear+=1;reasons.append("EMA20 پایین‌تر از EMA50")
+    if 55<=rv<70: score+=2;bull+=1;reasons.append("RSI مثبت")
+    elif 30<rv<=45: score-=2;bear+=1;reasons.append("RSI نزولی")
+    if hist>0: score+=2;bull+=1;reasons.append("MACD مثبت")
+    elif hist<0: score-=2;bear+=1;reasons.append("MACD منفی")
+    if vr>=1.2 and score!=0: score+=1 if score>0 else -1; reasons.append("حجم بالاتر از میانگین")
+    if roc>0.3: reasons.append("مومنتوم مثبت")
+    elif roc<-0.3: reasons.append("مومنتوم منفی")
+    return {"score":int(score),"bullish_votes":bull,"bearish_votes":bear,"price":close,"rsi":round(rv,2),"atr":safe_float(x.atr),"ema20":e20,"ema50":e50,"ema200":e200,"macd":safe_float(x.macd),"hist":hist,"volume_ratio":round(vr,2),"roc10_pct":round(roc,3),"reasons":reasons}
 
+def targets(price,atr_value,decision,frame):
+    risk=max(1.5*atr_value,price*.003)
+    if decision=="LONG": entry,stop=price,price-risk; t=[entry+1.2*risk,entry+2*risk,entry+3*risk]
+    elif decision=="SHORT": entry,stop=price,price+risk; t=[entry-1.2*risk,entry-2*risk,entry-3*risk]
+    else: return {"entry":None,"stop":None,"tp1":None,"tp2":None,"tp3":None,"risk_reward_tp1":0,"risk_reward_tp2":0,"risk_reward_tp3":0}
+    rr=abs(entry-stop); return {"entry":round(entry,8),"stop":round(stop,8),"tp1":round(t[0],8),"tp2":round(t[1],8),"tp3":round(t[2],8),"risk_reward_tp1":round(abs(t[0]-entry)/rr,2),"risk_reward_tp2":round(abs(t[1]-entry)/rr,2),"risk_reward_tp3":round(abs(t[2]-entry)/rr,2)}
 
-def build_signal(symbol, market, depth, trades, analyses):
-    weights = {"5m": 1, "15m": 2, "1h": 3, "4h": 4}
-    valid = {tf: a for tf, a in analyses.items() if isinstance(a, dict) and "error" not in a and safe_float(a.get("atr")) > 0}
-    missing = sorted(set(TIMEFRAMES) - set(valid))
-    price = safe_float(market.get("last"))
-    if not price:
-        return {"symbol": symbol, "price": 0, "decision": "NO TRADE", "confidence": 0, "entry": None, "stop": None, "tp1": None, "tp2": None, "score": 0, "reason": market.get("error", "قیمت دریافت نشد"), "invalidation": "—"}
-    if len(valid) < 3:
-        return {"symbol": symbol, "price": price, "decision": "NO TRADE", "confidence": 0, "entry": None, "stop": None, "tp1": None, "tp2": None, "score": 0, "reason": "داده کافی نیست؛ تایم‌فریم ناقص: " + ", ".join(missing), "invalidation": "—", "timeframes": analyses}
-
-    total = sum(a.get("score", 0) * weights.get(tf, 1) for tf, a in valid.items())
-    imbalance = safe_float(depth.get("imbalance"))
-    buy_ratio = safe_float(trades.get("buy_ratio"), 0.5)
-    total += 1 if imbalance > 0.15 else -1 if imbalance < -0.15 else 0
-    total += 1 if buy_ratio > 0.58 else -1 if buy_ratio < 0.42 else 0
-
-    spread_pct = safe_float(depth.get("spread_pct"))
-    max_spread = safe_float(os.getenv("MAX_SPREAD_PCT"), 0.5)
-    if spread_pct > max_spread:
-        return {"symbol": symbol, "price": price, "decision": "NO TRADE", "confidence": 0, "entry": None, "stop": None, "tp1": None, "tp2": None, "score": total, "reason": f"اسپرد زیاد است ({spread_pct:.3f}%)", "invalidation": "—", "timeframes": analyses}
-
-    decision = "LONG" if total >= 6 else "SHORT" if total <= -6 else "NO TRADE"
-    # Maximum theoretical score is 62: four timeframes x 6 points x their weights (1+2+3+4), plus 2 market microstructure points.
-    max_score = sum(6 * weight for weight in weights.values()) + 2
-    confidence = min(99, int(abs(total) / max_score * 100))
-    atr_value = safe_float(valid.get("15m", next(iter(valid.values()))).get("atr")) or price * 0.005
-    entry = stop = tp1 = tp2 = None
-    if decision == "LONG":
-        entry = price
-        stop = entry - 1.5 * atr_value
-        risk = entry - stop
-        tp1 = entry + 1.5 * risk
-        tp2 = entry + 2.5 * risk
-    elif decision == "SHORT":
-        entry = price
-        stop = entry + 1.5 * atr_value
-        risk = stop - entry
-        tp1 = entry - 1.5 * risk
-        tp2 = entry - 2.5 * risk
-
-    reasons = [r for a in valid.values() for r in a.get("reasons", [])]
-    rr1 = 1.5 if decision != "NO TRADE" else None
-    rr2 = 2.5 if decision != "NO TRADE" else None
-    return {"symbol": symbol, "decision": decision, "confidence": confidence, "entry": round(entry, 4) if entry else None, "stop": round(stop, 4) if stop else None, "tp1": round(tp1, 4) if tp1 else None, "tp2": round(tp2, 4) if tp2 else None, "score": total, "price": price, "risk_reward_tp1": rr1, "risk_reward_tp2": rr2, "reason": "؛ ".join(reasons[:10]) or "شرایط کافی نیست", "invalidation": "عبور از SL" if decision != "NO TRADE" else "—", "market": market, "orderbook": depth, "recent_trades": trades, "timeframes": analyses, "generated_at": now_utc()}
-
+def build_signal(symbol,market,depth,trades,derivatives,analyses):
+    valid={tf:a for tf,a in analyses.items() if isinstance(a,dict) and not a.get("error") and safe_float(a.get("atr"))>0}; price=safe_float(market.get("last"))
+    if not price or len(valid)<3: return {"symbol":symbol,"price":price,"decision":"NO TRADE","confidence":0,"score":0,"entry":None,"stop":None,"tp1":None,"tp2":None,"tp3":None,"reason":"داده معتبر کافی نیست؛ حداقل ۳ تایم‌فریم لازم است","invalidation":"—","timeframes":analyses}
+    score=sum(a.get("score",0)*WEIGHTS.get(tf,1) for tf,a in valid.items())/sum(WEIGHTS.get(tf,1) for tf in valid); imb=safe_float(depth.get("imbalance")); br=safe_float(trades.get("buy_ratio"),.5)
+    if imb>.15: score+=.5
+    elif imb<-.15: score-=.5
+    if br>.58: score+=.5
+    elif br<.42: score-=.5
+    fr=derivatives.get("funding_rate")
+    if fr is not None:
+        if fr>.0005: score-=.15
+        elif fr<-.0005: score+=.15
+    decision="LONG" if score>=3 else "SHORT" if score<=-3 else "NO TRADE"; higher=[valid.get(x,{}).get("score",0) for x in ("1h","4h") if x in valid]
+    if len(higher)<2 or (decision=="LONG" and any(x<=0 for x in higher)) or (decision=="SHORT" and any(x>=0 for x in higher)) or safe_float(depth.get("spread_pct"),999)>MAX_SPREAD_PCT: decision="NO TRADE"
+    conf=0 if decision=="NO TRADE" else min(95,int(abs(score)/6*100)); a=valid.get("15m",next(iter(valid.values()))); 
+    try: frame=get_candles(symbol,"15",300)
+    except Exception: frame=pd.DataFrame({"high":[price],"low":[price]})
+    t=targets(price,safe_float(a.get("atr")) or price*.005,decision,frame); reasons=[f"{tf}: {r}" for tf,a in valid.items() for r in a.get("reasons",[])];
+    if imb>.15: reasons.append("Order Book متمایل به خرید")
+    elif imb<-.15: reasons.append("Order Book متمایل به فروش")
+    return {"symbol":symbol,"decision":decision,"confidence":conf,"score":round(score,3),"price":price,**t,"reason":"؛ ".join(reasons[:16]) or "شرایط کافی نیست","invalidation":"رسیدن به Stop Loss یا تغییر ساختار تأییدکننده" if decision!="NO TRADE" else "—","market":market,"orderbook":depth,"recent_trades":trades,"derivatives":derivatives,"timeframes":analyses,"generated_at":now_utc(),"paper_only":True}
 
 def get_signal_snapshot(symbol=DEFAULT_SYMBOL):
     try:
-        market = wallex_snapshot(symbol)
-        if market.get("error"):
-            return {"symbol": symbol, "price": 0, "decision": "NO TRADE", "confidence": 0, "entry": None, "stop": None, "tp1": None, "tp2": None, "reason": market["error"], "invalidation": "—"}
-        depth, trades = wallex_depth(symbol), wallex_trades(symbol)
-        analyses = {}
-        for tf, resolution in TIMEFRAMES.items():
-            try:
-                analyses[tf] = timeframe_score(wallex_candles(symbol, resolution, 300))
-            except Exception as exc:
-                analyses[tf] = {"error": str(exc), "score": 0, "reasons": []}
-        result = build_signal(symbol, market, depth, trades, analyses)
-        save_event("signal_generated", result)
-        return result
-    except Exception as exc:
-        result = {"symbol": symbol, "price": 0, "decision": "NO TRADE", "confidence": 0, "entry": None, "stop": None, "tp1": None, "tp2": None, "reason": f"خطای موتور: {exc}", "invalidation": "—"}
-        save_event("engine_error", result)
-        return result
+        m=market_snapshot(symbol)
+        if m.get("error"): r={"symbol":symbol,"decision":"NO TRADE","confidence":0,"price":0,"reason":m["error"]}; save_event("no_trade",r); return r
+        d,tr,der=orderbook_snapshot(symbol),recent_trades(symbol),derivatives_snapshot(symbol); analyses={}
+        for tf,res in TIMEFRAMES.items():
+            try: analyses[tf]=timeframe_analysis(get_candles(symbol,res,300))
+            except Exception as e: analyses[tf]={"error":str(e),"score":0,"reasons":[]}
+        r=build_signal(symbol,m,d,tr,der,analyses); save_event("signal_generated",r); return r
+    except Exception as e:
+        r={"symbol":symbol,"decision":"NO TRADE","confidence":0,"price":0,"reason":f"خطای موتور: {e}"}; save_event("engine_error",r); return r
 
+def paper_records():
+    if not PAPER_JOURNAL.exists(): return []
+    rows=[]
+    with PAPER_JOURNAL.open("r",encoding="utf-8") as f:
+        for line in f:
+            try: rows.append(json.loads(line))
+            except json.JSONDecodeError: pass
+    return rows
 
-def paper_result(signal, high, low):
-    """Evaluate a completed candle/range against a generated signal without placing orders."""
-    if signal.get("decision") == "LONG":
-        if safe_float(low) <= safe_float(signal.get("stop")):
-            return "STOP"
-        if safe_float(high) >= safe_float(signal.get("tp2")):
-            return "TP2"
-        if safe_float(high) >= safe_float(signal.get("tp1")):
-            return "TP1"
-    elif signal.get("decision") == "SHORT":
-        if safe_float(high) >= safe_float(signal.get("stop")):
-            return "STOP"
-        if safe_float(low) <= safe_float(signal.get("tp2")):
-            return "TP2"
-        if safe_float(low) <= safe_float(signal.get("tp1")):
-            return "TP1"
-    return "OPEN"
+def daily_risk_halted():
+    today=datetime.now(timezone.utc).date().isoformat(); pnl=sum(safe_float(x.get("pnl")) for x in paper_records() if x.get("status")=="CLOSED" and str(x.get("closed_at","")).startswith(today)); return pnl<=-(PAPER_START_BALANCE*DAILY_LOSS_LIMIT_PCT/100)
 
+def paper_open(signal,quantity=1.0):
+    if signal.get("decision") not in {"LONG","SHORT"}: return {"ok":False,"reason":"سیگنال قابل ثبت در Paper نیست"}
+    if daily_risk_halted(): return {"ok":False,"reason":"Kill Switch روزانه فعال است"}
+    t={"id":f"paper-{int(time.time()*1000)}","symbol":signal["symbol"],"side":signal["decision"],"entry":signal.get("entry"),"stop":signal.get("stop"),"tp1":signal.get("tp1"),"tp2":signal.get("tp2"),"tp3":signal.get("tp3"),"quantity":quantity,"opened_at":now_utc(),"status":"OPEN"}
+    with PAPER_JOURNAL.open("a",encoding="utf-8") as f: f.write(json.dumps(t,ensure_ascii=False)+"\n")
+    save_event("paper_open",t); return {"ok":True,"trade":t}
+
+def paper_close(trade,exit_price,reason="manual"):
+    e,x,q=safe_float(trade.get("entry")),safe_float(exit_price),safe_float(trade.get("quantity"),1); pnl=(x-e)*q if trade.get("side")=="LONG" else (e-x)*q; c=dict(trade,exit=x,pnl=pnl,reason=reason,closed_at=now_utc(),status="CLOSED")
+    with PAPER_JOURNAL.open("a",encoding="utf-8") as f: f.write(json.dumps(c,ensure_ascii=False)+"\n")
+    save_event("paper_close",c); return c
 
 def paper_stats():
-    if not JOURNAL.exists():
-        return {"closed": 0, "wins": 0, "stops": 0, "win_rate": 0.0}
-    closed = wins = stops = 0
-    with JOURNAL.open("r", encoding="utf-8") as f:
-        for line in f:
-            try:
-                item = json.loads(line)
-                result = item.get("payload", {}).get("result") if item.get("event") == "paper_result" else None
-                if result in {"TP1", "TP2", "STOP"}:
-                    closed += 1
-                    wins += result in {"TP1", "TP2"}
-                    stops += result == "STOP"
-            except (json.JSONDecodeError, TypeError):
-                continue
-    return {"closed": closed, "wins": wins, "stops": stops, "win_rate": round(wins / closed * 100, 2) if closed else 0.0}
+    p=[safe_float(x.get("pnl")) for x in paper_records() if x.get("status")=="CLOSED"]; w=[x for x in p if x>0]; l=[x for x in p if x<0]; gl=abs(sum(l)); return {"closed":len(p),"wins":len(w),"losses":len(l),"win_rate":round(len(w)/len(p)*100,2) if p else 0,"profit_factor":round(sum(w)/gl,3) if gl else (999 if w else 0),"pnl":round(sum(p),8)}
 
+def paper_status():
+    s=paper_stats(); return {"mode":"PAPER","balance_start":PAPER_START_BALANCE,"open_trades":sum(1 for x in paper_records() if x.get("status")=="OPEN"),"daily_loss_limit_pct":DAILY_LOSS_LIMIT_PCT,"kill_switch":daily_risk_halted(),**s}
 
-def review_with_ai(client, snapshot):
-    prompt = f"""گزارش Trading Guardian:\n{json.dumps(snapshot, ensure_ascii=False, indent=2)}\n\nداده‌های روند، EMA، RSI، MACD، ATR، حجم و Order Book را بررسی کن. اعتبار LONG/SHORT یا دلیل NO TRADE را ارزیابی و ریسک‌ها و تناقض‌ها را بگو. هیچ سود تضمینی یا قطعیتی اعلام نکن. هیچ معامله واقعی انجام نده. پاسخ فارسی و ساختاریافته باشد."""
-    response = client.responses.create(model=os.getenv("OPENAI_MODEL", "gpt-5.6"), tools=[{"type": "web_search"}], input=prompt)
-    return response.output_text
+def review_with_ai(client,snapshot):
+    prompt=f"گزارش Trading Guardian فقط برای Paper Trading:\n{json.dumps(snapshot,ensure_ascii=False,indent=2)}\n\nتایم‌فریم‌ها، EMA، RSI، MACD، ATR، حجم، Order Book، Funding، OI و Liquidation را نقد کن. تناقض و داده ناقص را مشخص کن. اگر شواهد کافی نیست NO TRADE بگو. confidence تضمین برد نیست و معامله واقعی انجام نده. پاسخ فارسی و ساختاریافته باشد."
+    r=client.responses.create(model=os.getenv("OPENAI_MODEL","gpt-5.6"),tools=[{"type":"web_search"}],input=prompt); return r.output_text
+
+__all__=["get_signal_snapshot","review_with_ai","paper_open","paper_close","paper_stats","paper_status","daily_risk_halted","wallex_snapshot","wallex_depth","wallex_trades","wallex_candles","derivatives_snapshot","SYMBOLS"]
