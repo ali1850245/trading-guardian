@@ -7,220 +7,160 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ChatAction
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
-from engine import get_signal_snapshot, paper_stats, review_with_ai, save_event
+from engine import SYMBOLS, daily_risk_halted, get_signal_snapshot, paper_open, paper_stats, paper_status, review_with_ai, save_event
 
 load_dotenv()
-
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-if TOKEN and any(ch.isspace() or ord(ch) < 32 or ord(ch) > 126 for ch in TOKEN):
-    TOKEN = ""
-if not TOKEN:
-    raise RuntimeError("TELEGRAM_BOT_TOKEN is missing")
-
 OPENAI_KEY = os.getenv("OPENAI_API_KEY", "").strip()
-ALLOWED_USERS = {x.strip() for x in os.getenv("TELEGRAM_ALLOWED_USER_IDS", "").split(",") if x.strip()}
+ALLOWED = {x.strip() for x in os.getenv("TELEGRAM_ALLOWED_USER_IDS", "").split(",") if x.strip()}
 MONITOR_CHAT_ID = os.getenv("TELEGRAM_MONITOR_CHAT_ID", "").strip()
 MONITOR_INTERVAL = max(30, int(os.getenv("MONITOR_INTERVAL_SECONDS", "60")))
 client = OpenAI(api_key=OPENAI_KEY) if OPENAI_KEY else None
 
-
-def authorized(update: Update) -> bool:
-    if not ALLOWED_USERS:
-        return True
-    user = update.effective_user
-    return bool(user and str(user.id) in ALLOWED_USERS)
+if not TOKEN or any(ord(c) < 32 or ord(c) > 126 or c.isspace() for c in TOKEN):
+    raise RuntimeError("TELEGRAM_BOT_TOKEN is missing or invalid")
 
 
-def keyboard():
+def authorized(update):
+    if not ALLOWED: return True
+    u=update.effective_user
+    return bool(u and str(u.id) in ALLOWED)
+
+
+def kb_main():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📊 Signal", callback_data="signal")],
-        [InlineKeyboardButton("🤖 AI Review", callback_data="review")],
-        [InlineKeyboardButton("📈 Paper Stats", callback_data="stats")],
-        [InlineKeyboardButton("🛡️ Safety", callback_data="safety")],
+        [InlineKeyboardButton("📊 داشبورد", callback_data="dashboard"), InlineKeyboardButton("📡 بازار", callback_data="markets")],
+        [InlineKeyboardButton("🟢 سیگنال", callback_data="signal"), InlineKeyboardButton("🧠 بررسی AI", callback_data="review")],
+        [InlineKeyboardButton("📒 Paper Trading", callback_data="paper"), InlineKeyboardButton("📈 عملکرد", callback_data="stats")],
+        [InlineKeyboardButton("🛡️ ریسک و Kill Switch", callback_data="safety"), InlineKeyboardButton("⚙️ تنظیمات", callback_data="settings")],
+        [InlineKeyboardButton("❓ راهنما", callback_data="help")],
     ])
 
 
-def fmt_num(value):
-    if value is None:
-        return "—"
-    try:
-        return f"{float(value):,.4f}"
-    except (TypeError, ValueError):
-        return str(value)
+def kb_symbols():
+    return InlineKeyboardMarkup([[InlineKeyboardButton(f"{s}", callback_data=f"sig:{s}") for s in SYMBOLS[:3]], [InlineKeyboardButton("⬅️ منوی اصلی", callback_data="home")]])
+
+
+def fmt(v, digits=4):
+    if v is None: return "—"
+    try: return f"{float(v):,.{digits}f}"
+    except Exception: return str(v)
 
 
 def format_signal(s):
-    decision = s.get("decision", "NO TRADE")
-    labels = {"LONG": "🟢 LONG", "SHORT": "🔴 SHORT", "NO TRADE": "⚪ NO TRADE"}
-    lines = [
-        f"📊 Trading Guardian — {s.get('symbol', '-')}",
-        f"وضعیت: {labels.get(decision, decision)}",
-        f"قیمت: {fmt_num(s.get('price'))}",
-        f"امتیاز: {s.get('score', '-')}",
-        f"اعتماد محاسباتی: {s.get('confidence', 0)}%",
-    ]
-    if decision != "NO TRADE":
-        lines += [
-            f"ورود: {fmt_num(s.get('entry'))}",
-            f"🛑 حد ضرر: {fmt_num(s.get('stop'))}",
-            f"🎯 تارگت ۱: {fmt_num(s.get('tp1'))}  | R:R {s.get('risk_reward_tp1', '—')}",
-            f"🎯 تارگت ۲: {fmt_num(s.get('tp2'))}  | R:R {s.get('risk_reward_tp2', '—')}",
-        ]
-    lines += [f"دلیل: {s.get('reason', '—')}", f"ابطال: {s.get('invalidation', '—')}"]
+    d=s.get("decision","NO TRADE"); label={"LONG":"🟢 LONG","SHORT":"🔴 SHORT","NO TRADE":"🟡 NO TRADE"}.get(d,d)
+    lines=[f"📊 Trading Guardian | {s.get('symbol','-')}",f"تصمیم: {label}",f"قیمت: {fmt(s.get('price'))}",f"امتیاز: {s.get('score','—')}",f"اطمینان محاسباتی: {s.get('confidence',0)}%"]
+    if d!="NO TRADE": lines += [f"Entry: {fmt(s.get('entry'))}",f"🛑 SL: {fmt(s.get('stop'))}",f"🎯 TP1: {fmt(s.get('tp1'))} | R:R {s.get('risk_reward_tp1','—')}",f"🎯 TP2: {fmt(s.get('tp2'))} | R:R {s.get('risk_reward_tp2','—')}",f"🎯 TP3: {fmt(s.get('tp3'))} | R:R {s.get('risk_reward_tp3','—')}"]
+    der=s.get("derivatives",{})
+    lines += [f"Funding: {fmt(der.get('funding_rate'),6)} | OI: {fmt(der.get('open_interest'),2)}",f"دلیل: {s.get('reason','—')}",f"ابطال: {s.get('invalidation','—')}","⚠️ این خروجی فقط Paper/تحلیلی است."]
     return "\n".join(lines)
 
 
-def format_stats():
-    s = paper_stats()
-    return (
-        "📈 Paper Trading Stats\n"
-        f"معاملات بسته‌شده: {s['closed']}\n"
-        f"موفق: {s['wins']}\n"
-        f"حدضرر: {s['stops']}\n"
-        f"Win Rate: {s['win_rate']}%\n\n"
-        "این آمار فقط از نتایج ثبت‌شده در Paper Trading است."
-    )
+def dashboard_text():
+    p=paper_status(); return ("🛡️ Trading Guardian\n\nحالت: 📒 PAPER TRADING\n"
+        f"سرمایه مجازی شروع: {fmt(p['balance_start'],2)}\nPnL ثبت‌شده: {fmt(p['pnl'],2)}\n"
+        f"معاملات بسته: {p['closed']} | Win Rate: {p['win_rate']}%\n"
+        f"Profit Factor: {p['profit_factor']}\nمعاملات باز: {p['open_trades']}\n"
+        f"Kill Switch روزانه: {'🔴 فعال' if p['kill_switch'] else '🟢 آماده'}\n\n"
+        "سفارش واقعی و برداشت وجه در این نسخه فعال نیست.")
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not authorized(update):
-        return await update.message.reply_text("Unauthorized")
-    await update.message.reply_text(
-        "🛡️ ChatGPT Trading Guardian — PAPER TRADING\n"
-        "مانیتورینگ خودکار: فعال\n"
-        "معامله واقعی: غیرفعال\n"
-        "برداشت: غیرفعال\n\n"
-        "سیگنال، Entry، حد ضرر و Target از داده بازار محاسبه می‌شوند.",
-        reply_markup=keyboard(),
-    )
+def stats_text():
+    s=paper_stats(); return ("📈 عملکرد Paper\n\n" f"بسته‌شده: {s['closed']}\nبرد: {s['wins']}\nباخت: {s['losses']}\n"
+        f"Win Rate: {s['win_rate']}%\nProfit Factor: {s['profit_factor']}\nPnL: {fmt(s['pnl'],2)}")
 
 
-async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not authorized(update):
-        return
-    target = update.callback_query.message if update.callback_query else update.message
+def markets_text():
+    return "📡 بازارهای فعال\n\n" + "\n".join(f"• {s}" for s in SYMBOLS) + "\n\nداده تحلیلی از Wallex و در صورت نیاز Binance عمومی گرفته می‌شود."
+
+
+def safety_text():
+    p=paper_status(); return ("🛡️ وضعیت ایمنی\n\nحالت: PAPER ONLY\nسفارش واقعی: خاموش\nبرداشت: متصل نیست\n"
+        f"Daily loss limit: {p['daily_loss_limit_pct']}%\nKill Switch: {'🔴 فعال' if p['kill_switch'] else '🟢 آماده'}\n"
+        "اصلاح خودکار کد از داخل ربات: خاموش\nAI فقط برای بررسی و توضیح است.")
+
+
+def help_text():
+    return ("❓ راهنما\n\n/start — منوی اصلی\n/signal — انتخاب نماد\n/stats — عملکرد Paper\n/health — سلامت سرویس\n/help — راهنما\n\n"
+            "منو برای استفاده روزمره طراحی شده و همه عملیات حساس به حالت Paper محدود هستند.")
+
+
+async def start(update, context):
+    if not authorized(update): return
+    await update.message.reply_text("🛡️ Trading Guardian آماده است.\nحالت فعلی: PAPER TRADING", reply_markup=kb_main())
+
+
+async def send_signal(target, symbol):
     try:
-        snapshot = await asyncio.to_thread(get_signal_snapshot)
-        save_event("telegram_signal", snapshot)
-        text = format_signal(snapshot)
-        if update.callback_query:
-            await update.callback_query.answer()
-            await target.edit_message_text(text, reply_markup=keyboard())
-        else:
-            await target.reply_text(text, reply_markup=keyboard())
-    except Exception as exc:
-        await target.reply_text(f"⚠️ خطا در دریافت سیگنال: {exc}", reply_markup=keyboard())
+        s=await asyncio.to_thread(get_signal_snapshot, symbol); save_event("telegram_signal",s)
+        buttons=[]
+        if s.get("decision") in {"LONG","SHORT"} and not daily_risk_halted(): buttons.append(InlineKeyboardButton("📒 ثبت در Paper",callback_data=f"paperopen:{symbol}"))
+        buttons.append(InlineKeyboardButton("🔄 دوباره",callback_data=f"sig:{symbol}"))
+        buttons.append(InlineKeyboardButton("⬅️ بازار",callback_data="markets"))
+        await target.reply_text(format_signal(s),reply_markup=InlineKeyboardMarkup([buttons,[InlineKeyboardButton("🏠 خانه",callback_data="home")]]))
+    except Exception as e: await target.reply_text(f"⚠️ خطا: {e}",reply_markup=kb_main())
 
 
-async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not authorized(update):
+async def callback(update, context):
+    q=update.callback_query
+    if not authorized(update): return await q.answer()
+    await q.answer(); data=q.data
+    if data=="home": return await q.edit_message_text(dashboard_text(),reply_markup=kb_main())
+    if data=="dashboard": return await q.edit_message_text(dashboard_text(),reply_markup=kb_main())
+    if data=="markets": return await q.edit_message_text(markets_text(),reply_markup=kb_symbols())
+    if data=="stats": return await q.edit_message_text(stats_text(),reply_markup=kb_main())
+    if data=="safety": return await q.edit_message_text(safety_text(),reply_markup=kb_main())
+    if data=="help": return await q.edit_message_text(help_text(),reply_markup=kb_main())
+    if data=="settings": return await q.edit_message_text("⚙️ تنظیمات\n\nنماد پیش‌فرض: " + os.getenv("SYMBOL","BTCUSDT") + "\nبازه مانیتور: " + str(MONITOR_INTERVAL) + " ثانیه\n\nکلیدها فقط از Environment خوانده می‌شوند.",reply_markup=kb_main())
+    if data=="signal": return await q.edit_message_text("🟢 نماد را انتخاب کن:",reply_markup=kb_symbols())
+    if data=="paper": return await q.edit_message_text(dashboard_text(),reply_markup=kb_main())
+    if data=="review":
+        if client is None: return await q.edit_message_text("⚠️ OPENAI_API_KEY تنظیم نشده است. در Environment مقدار آن را قرار بده.",reply_markup=kb_main())
+        await q.edit_message_text("🧠 در حال بررسی آخرین وضعیت...",reply_markup=kb_main()); await q.message.chat.send_action(ChatAction.TYPING)
+        try:
+            s=await asyncio.to_thread(get_signal_snapshot); result=await asyncio.to_thread(review_with_ai,client,s); save_event("review",{"snapshot":s,"result":result}); await q.message.reply_text(result[:4000],reply_markup=kb_main())
+        except Exception as e: await q.message.reply_text(f"⚠️ خطای AI: {e}",reply_markup=kb_main())
         return
-    target = update.callback_query.message if update.callback_query else update.message
-    if update.callback_query:
-        await update.callback_query.answer()
-    await target.reply_text(format_stats(), reply_markup=keyboard())
+    if data.startswith("sig:"):
+        await q.message.chat.send_action(ChatAction.TYPING); return await send_signal(q.message,data.split(":",1)[1])
+    if data.startswith("paperopen:"):
+        symbol=data.split(":",1)[1]; s=await asyncio.to_thread(get_signal_snapshot,symbol); result=await asyncio.to_thread(paper_open,s,1.0)
+        return await q.message.reply_text(("✅ در Paper ثبت شد.\n" if result.get("ok") else "⚠️ ثبت نشد: ") + (str(result.get("trade")) if result.get("ok") else result.get("reason","—")),reply_markup=kb_main())
 
 
-async def review(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not authorized(update):
-        return
-    target = update.callback_query.message if update.callback_query else update.message
-    if update.callback_query:
-        await update.callback_query.answer()
-        await target.chat.send_action(ChatAction.TYPING)
-    if client is None:
-        return await target.reply_text("OPENAI_API_KEY تنظیم نشده است.", reply_markup=keyboard())
-    try:
-        snapshot = await asyncio.to_thread(get_signal_snapshot)
-        result = await asyncio.to_thread(review_with_ai, client, snapshot)
-        save_event("review", {"snapshot": snapshot, "result": result})
-        await target.reply_text(result[:4000], reply_markup=keyboard())
-    except Exception as exc:
-        await target.reply_text(f"⚠️ خطا در بررسی AI: {exc}", reply_markup=keyboard())
+async def signal_cmd(update,context):
+    if not authorized(update): return
+    await update.message.reply_text("🟢 نماد را انتخاب کن:",reply_markup=kb_symbols())
+
+async def stats_cmd(update,context):
+    if authorized(update): await update.message.reply_text(stats_text(),reply_markup=kb_main())
+
+async def health(update,context):
+    if not authorized(update): return
+    await update.message.reply_text("🟢 Bot process: OK\n🟢 Paper engine: available\n🟢 Live orders: DISABLED\n🟢 Withdrawals: DISABLED",reply_markup=kb_main())
+
+async def help_cmd(update,context):
+    if authorized(update): await update.message.reply_text(help_text(),reply_markup=kb_main())
 
 
-async def safety(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not authorized(update):
-        return
-    target = update.callback_query.message if update.callback_query else update.message
-    if update.callback_query:
-        await update.callback_query.answer()
-    await target.reply_text(
-        "🛡️ Safety Status\n\n"
-        "حالت: PAPER TRADING\n"
-        "سفارش واقعی: خاموش\n"
-        "برداشت وجه: متصل نیست\n"
-        "اصلاح خودکار کد: خاموش\n"
-        "AI: فقط بررسی/پیشنهاد؛ تغییر مستقیم نسخه فعال ممنوع",
-        reply_markup=keyboard(),
-    )
-
-
-async def monitor_loop(app: Application):
-    if not MONITOR_CHAT_ID:
-        return
-    last_decision = None
-    last_signature = None
+async def monitor_loop(app):
+    if not MONITOR_CHAT_ID: return
+    last=None
     while True:
         try:
-            snapshot = await asyncio.to_thread(get_signal_snapshot)
-            decision = snapshot.get("decision", "NO TRADE")
-            signature = (
-                decision,
-                snapshot.get("entry"),
-                snapshot.get("stop"),
-                snapshot.get("tp1"),
-                snapshot.get("tp2"),
-            )
-            # Notify only when an actionable signal appears or its scenario changes.
-            if decision != "NO TRADE" and signature != last_signature:
-                await app.bot.send_message(chat_id=MONITOR_CHAT_ID, text=format_signal(snapshot), reply_markup=keyboard())
-            elif last_decision in {"LONG", "SHORT"} and decision != last_decision:
-                await app.bot.send_message(
-                    chat_id=MONITOR_CHAT_ID,
-                    text=f"⚠️ تغییر سناریو\nسناریوی قبلی: {last_decision}\nسناریوی فعلی: {decision}",
-                    reply_markup=keyboard(),
-                )
-            last_decision = decision
-            last_signature = signature
-            save_event("monitor_tick", snapshot)
-        except Exception as exc:
-            save_event("monitor_error", {"error": str(exc)})
-            try:
-                await app.bot.send_message(chat_id=MONITOR_CHAT_ID, text=f"⚠️ خطای مانیتورینگ: {exc}")
-            except Exception:
-                pass
+            for symbol in SYMBOLS:
+                s=await asyncio.to_thread(get_signal_snapshot,symbol); sig=(symbol,s.get("decision"),s.get("entry"),s.get("stop"),s.get("tp1"))
+                if s.get("decision")!="NO TRADE" and sig!=last:
+                    await app.bot.send_message(chat_id=MONITOR_CHAT_ID,text=format_signal(s),reply_markup=kb_main()); last=sig
+                save_event("monitor_tick",s)
+        except Exception as e: save_event("monitor_error",{"error":str(e)})
         await asyncio.sleep(MONITOR_INTERVAL)
 
-
-async def post_init(app: Application):
-    app.create_task(monitor_loop(app), name="market-monitor")
-
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not authorized(update):
-        return
-    await update.message.reply_text(
-        "/start — منوی اصلی\n"
-        "/signal — دریافت سیگنال و تارگت‌ها\n"
-        "/stats — آمار Paper Trading\n"
-        "/help — راهنما\n\n"
-        "حالت اجرا: Paper Trading؛ سفارش واقعی خودکار فعال نیست."
-    )
-
+async def post_init(app): app.create_task(monitor_loop(app),name="market-monitor")
 
 def main():
-    app = Application.builder().token(TOKEN).post_init(post_init).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("signal", signal))
-    app.add_handler(CommandHandler("stats", stats))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CallbackQueryHandler(signal, pattern="^signal$"))
-    app.add_handler(CallbackQueryHandler(review, pattern="^review$"))
-    app.add_handler(CallbackQueryHandler(stats, pattern="^stats$"))
-    app.add_handler(CallbackQueryHandler(safety, pattern="^safety$"))
+    app=Application.builder().token(TOKEN).post_init(post_init).build()
+    app.add_handler(CommandHandler("start",start)); app.add_handler(CommandHandler("signal",signal_cmd)); app.add_handler(CommandHandler("stats",stats_cmd)); app.add_handler(CommandHandler("health",health)); app.add_handler(CommandHandler("help",help_cmd)); app.add_handler(CallbackQueryHandler(callback))
     app.run_polling(drop_pending_updates=True)
 
-
-if __name__ == "__main__":
-    main()
+if __name__=="__main__": main()
