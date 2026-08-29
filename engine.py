@@ -27,7 +27,6 @@ TIMEFRAMES = {
     "1h": {"resolution": "60", "minutes": 60, "weight": 4, "role": "structure"},
     "4h": {"resolution": "240", "minutes": 240, "weight": 5, "role": "structure"},
     "1d": {"resolution": "1D", "minutes": 1440, "weight": 6, "role": "macro"},
-    "2d": {"resolution": "2D", "minutes": 2880, "weight": 7, "role": "macro"},
 }
 WEIGHTS = {k: v["weight"] for k, v in TIMEFRAMES.items()}
 MIN_CANDLES = int(os.getenv("MIN_CANDLES", "220"))
@@ -132,32 +131,25 @@ def _clean_binance(rows):
     return f[["timestamp","open","high","low","close","volume"]].replace([np.inf,-np.inf],np.nan).dropna().drop_duplicates("timestamp").sort_values("timestamp").reset_index(drop=True)
 
 
-def _aggregate_2d(frame):
-    if frame.empty: return frame
-    x = frame.copy(); x["dt"] = pd.to_datetime(x["timestamp"], unit="s", utc=True); x["bucket"] = x["dt"].dt.floor("2D")
-    return x.groupby("bucket", sort=True).agg(timestamp=("timestamp","first"), open=("open","first"), high=("high","max"), low=("low","min"), close=("close","last"), volume=("volume","sum")).reset_index(drop=True)
-
-
 def get_candles(symbol=DEFAULT_SYMBOL, resolution="15", limit=300):
-    resolution = str(resolution); is_2d = resolution.upper() == "2D"
+    resolution = str(resolution)
     interval = {"5":"5m","10":"10m","15":"15m","30":"30m","60":"1h","240":"4h","1D":"1d"}.get(resolution)
-    fetch_limit = min(max(limit * 2 if is_2d else limit, MIN_CANDLES), 1000)
+    fetch_limit = min(max(limit, MIN_CANDLES), 1000)
     primary_error = None
     try:
         if not interval: raise RuntimeError(f"Unsupported native interval: {resolution}")
         rows = api_get(BINANCE, "/api/v3/klines", {"symbol": symbol, "interval": interval, "limit": fetch_limit})
         frame = _clean_binance(rows)
         if len(frame) < MIN_CANDLES: raise RuntimeError(f"Not enough candles: {len(frame)}")
-        if is_2d: frame = _aggregate_2d(frame)
         if len(frame) > 1: frame = frame.iloc[:-1].reset_index(drop=True)  # closed candles only
         if len(frame) < MIN_CANDLES: raise RuntimeError("Not enough closed candles")
         return frame.tail(limit).reset_index(drop=True)
     except Exception as e: primary_error = e
 
-    # Wallex fallback for intervals it can serve. 2d is built from daily candles when possible.
+    # Wallex fallback for intervals it can serve.
     try:
-        wallex_res = "D" if resolution == "1D" else ("D" if is_2d else resolution)
-        minutes = 2880 if is_2d else TIMEFRAMES.get(resolution, {}).get("minutes", 15)
+        wallex_res = "D" if resolution == "1D" else resolution
+        minutes = TIMEFRAMES.get(resolution, {}).get("minutes", 15)
         end = int(time.time()); start = end - minutes * 60 * fetch_limit
         d = api_get(WALLEX, "/v1/udf/history", {"symbol": symbol, "resolution": wallex_res, "from": start, "to": end})
         if d.get("s") != "ok": raise RuntimeError(str(d))
@@ -166,7 +158,6 @@ def get_candles(symbol=DEFAULT_SYMBOL, resolution="15", limit=300):
         frame = pd.DataFrame({"timestamp":d["t"][:n],"open":d["o"][:n],"high":d["h"][:n],"low":d["l"][:n],"close":d["c"][:n],"volume":d["v"][:n]})
         for c in ["open","high","low","close","volume"]: frame[c] = pd.to_numeric(frame[c], errors="coerce")
         frame = frame.replace([np.inf,-np.inf],np.nan).dropna().drop_duplicates("timestamp").sort_values("timestamp").reset_index(drop=True)
-        if is_2d: frame = _aggregate_2d(frame)
         if len(frame) > 1: frame = frame.iloc[:-1].reset_index(drop=True)
         if len(frame) < MIN_CANDLES: raise RuntimeError("Not enough closed Wallex candles")
         return frame.tail(limit).reset_index(drop=True)
@@ -231,7 +222,6 @@ def _direction(score, threshold=2): return 1 if score>=threshold else -1 if scor
 
 
 def higher_timeframe_context(analyses):
-    macro = [analyses.get(x,{}).get("score",0) for x in ("1d","2d") if not analyses.get(x,{}).get("error")]
     structure = [analyses.get(x,{}).get("score",0) for x in ("1h","4h") if not analyses.get(x,{}).get("error")]
     macro_dir = _direction(sum(macro)/len(macro), 2) if macro else 0
     structure_dir = _direction(sum(structure)/len(structure), 2) if structure else 0
@@ -280,7 +270,6 @@ def build_signal(symbol,market,depth,trades,derivatives,analyses):
     if decision=="SHORT" and (trigger_avg>1 or setup_avg>1): decision="NO TRADE"
     if safe_float(depth.get("spread_pct"),999)>MAX_SPREAD_PCT: decision="NO TRADE"
     alignment_parts=[]
-    for name in ("2d","1d","4h","1h","30m","15m","10m","5m"):
         if name in valid: alignment_parts.append(_direction(valid[name]["score"],2))
     aligned=sum(1 for x in alignment_parts if x!=0 and x==(1 if decision=="LONG" else -1 if decision=="SHORT" else 0))
     confidence=0 if decision=="NO TRADE" else min(95,int((abs(weighted)/5)*65 + aligned/max(len(alignment_parts),1)*35))
