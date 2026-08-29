@@ -31,28 +31,20 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
+          import re
           path = Path('engine.py')
           text = path.read_text(encoding='utf-8')
-          broken = '''    alignment_parts=[]\n        if name in valid: alignment_parts.append(_direction(valid[name]["score"],2))'''
-          fixed = '''    alignment_parts=[]\n    for name in ("1d","4h","1h","30m","15m","10m","5m"):\n        if name in valid: alignment_parts.append(_direction(valid[name]["score"],2))'''
-          if broken in text:
-              path.write_text(text.replace(broken, fixed, 1), encoding='utf-8')
+          pattern = re.compile(r'(?m)^(?P<indent>[ \t]*)alignment_parts=\[\]\n(?P<bad>[ \t]+)if name in valid: alignment_parts\.append\(_direction\(valid\[name\]\["score"\],2\)\)')
+          replacement = '''\\g<indent>alignment_parts=[]
+          \\g<indent>for name in ("1d","4h","1h","30m","15m","10m","5m"):
+          \\g<indent>    if name in valid: alignment_parts.append(_direction(valid[name]["score"],2))'''
+          fixed, count = pattern.subn(replacement, text, count=1)
+          if count:
+              path.write_text(fixed, encoding='utf-8')
               print('Repaired engine alignment loop')
           else:
               print('No malformed alignment loop found')
           PY
-
-      - name: Commit repair
-        run: |
-          if git diff --quiet -- engine.py; then
-            echo "No repair commit needed"
-          else
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add engine.py
-            git commit -m "Fix malformed multi-timeframe alignment loop"
-            git push
-          fi
 
       - name: Validate Python files
         run: python -m py_compile engine.py bot.py tests/test_engine.py
