@@ -197,7 +197,9 @@ def build_signal(symbol, market, depth, trades, analyses):
         return {"symbol": symbol, "price": price, "decision": "NO TRADE", "confidence": 0, "entry": None, "stop": None, "tp1": None, "tp2": None, "score": total, "reason": f"اسپرد زیاد است ({spread_pct:.3f}%)", "invalidation": "—", "timeframes": analyses}
 
     decision = "LONG" if total >= 6 else "SHORT" if total <= -6 else "NO TRADE"
-    confidence = min(99, int(abs(total) / 17 * 100))
+    # Maximum theoretical score is 62: four timeframes x 6 points x their weights (1+2+3+4), plus 2 market microstructure points.
+    max_score = sum(6 * weight for weight in weights.values()) + 2
+    confidence = min(99, int(abs(total) / max_score * 100))
     atr_value = safe_float(valid.get("15m", next(iter(valid.values()))).get("atr")) or price * 0.005
     entry = stop = tp1 = tp2 = None
     if decision == "LONG":
