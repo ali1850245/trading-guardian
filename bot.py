@@ -7,7 +7,8 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ChatAction
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
-from engine import SYMBOLS, daily_risk_halted, get_signal_snapshot, paper_open, paper_stats, paper_status, review_with_ai, save_event
+from engine import SYMBOLS, daily_risk_halted, get_signal_snapshot, paper_open, paper_stats, paper_status, save_event
+from review import review_with_ai
 
 load_dotenv()
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -20,12 +21,10 @@ client = OpenAI(api_key=OPENAI_KEY) if OPENAI_KEY else None
 if not TOKEN or any(ord(c) < 32 or ord(c) > 126 or c.isspace() for c in TOKEN):
     raise RuntimeError("TELEGRAM_BOT_TOKEN is missing or invalid")
 
-
 def authorized(update):
     if not ALLOWED: return True
     u=update.effective_user
     return bool(u and str(u.id) in ALLOWED)
-
 
 def kb_main():
     return InlineKeyboardMarkup([
@@ -36,16 +35,13 @@ def kb_main():
         [InlineKeyboardButton("❓ راهنما", callback_data="help")],
     ])
 
-
 def kb_symbols():
     return InlineKeyboardMarkup([[InlineKeyboardButton(f"{s}", callback_data=f"sig:{s}") for s in SYMBOLS[:3]], [InlineKeyboardButton("⬅️ منوی اصلی", callback_data="home")]])
-
 
 def fmt(v, digits=4):
     if v is None: return "—"
     try: return f"{float(v):,.{digits}f}"
     except Exception: return str(v)
-
 
 def format_signal(s):
     d=s.get("decision","NO TRADE"); label={"LONG":"🟢 LONG","SHORT":"🔴 SHORT","NO TRADE":"🟡 NO TRADE"}.get(d,d)
@@ -55,58 +51,34 @@ def format_signal(s):
     lines += [f"Funding: {fmt(der.get('funding_rate'),6)} | OI: {fmt(der.get('open_interest'),2)}",f"دلیل: {s.get('reason','—')}",f"ابطال: {s.get('invalidation','—')}","⚠️ این خروجی فقط Paper/تحلیلی است."]
     return "\n".join(lines)
 
-
 def dashboard_text():
-    p=paper_status(); return ("🛡️ Trading Guardian\n\nحالت: 📒 PAPER TRADING\n"
-        f"سرمایه مجازی شروع: {fmt(p['balance_start'],2)}\nPnL ثبت‌شده: {fmt(p['pnl'],2)}\n"
-        f"معاملات بسته: {p['closed']} | Win Rate: {p['win_rate']}%\n"
-        f"Profit Factor: {p['profit_factor']}\nمعاملات باز: {p['open_trades']}\n"
-        f"Kill Switch روزانه: {'🔴 فعال' if p['kill_switch'] else '🟢 آماده'}\n\n"
-        "سفارش واقعی و برداشت وجه در این نسخه فعال نیست.")
-
+    p=paper_status(); return ("🛡️ Trading Guardian\n\nحالت: 📒 PAPER TRADING\n" f"سرمایه مجازی شروع: {fmt(p['balance_start'],2)}\nPnL ثبت‌شده: {fmt(p['pnl'],2)}\n" f"معاملات بسته: {p['closed']} | Win Rate: {p['win_rate']}%\n" f"Profit Factor: {p['profit_factor']}\nمعاملات باز: {p['open_trades']}\n" f"Kill Switch روزانه: {'🔴 فعال' if p['kill_switch'] else '🟢 آماده'}\n\n" "سفارش واقعی و برداشت وجه در این نسخه فعال نیست.")
 
 def stats_text():
-    s=paper_stats(); return ("📈 عملکرد Paper\n\n" f"بسته‌شده: {s['closed']}\nبرد: {s['wins']}\nباخت: {s['losses']}\n"
-        f"Win Rate: {s['win_rate']}%\nProfit Factor: {s['profit_factor']}\nPnL: {fmt(s['pnl'],2)}")
+    s=paper_stats(); return ("📈 عملکرد Paper\n\n" f"بسته‌شده: {s['closed']}\nبرد: {s['wins']}\nباخت: {s['losses']}\n" f"Win Rate: {s['win_rate']}%\nProfit Factor: {s['profit_factor']}\nPnL: {fmt(s['pnl'],2)}")
 
-
-def markets_text():
-    return "📡 بازارهای فعال\n\n" + "\n".join(f"• {s}" for s in SYMBOLS) + "\n\nداده تحلیلی از Wallex و در صورت نیاز Binance عمومی گرفته می‌شود."
-
-
+def markets_text(): return "📡 بازارهای فعال\n\n" + "\n".join(f"• {s}" for s in SYMBOLS) + "\n\nداده تحلیلی از Wallex و در صورت نیاز Binance عمومی گرفته می‌شود."
 def safety_text():
-    p=paper_status(); return ("🛡️ وضعیت ایمنی\n\nحالت: PAPER ONLY\nسفارش واقعی: خاموش\nبرداشت: متصل نیست\n"
-        f"Daily loss limit: {p['daily_loss_limit_pct']}%\nKill Switch: {'🔴 فعال' if p['kill_switch'] else '🟢 آماده'}\n"
-        "اصلاح خودکار کد از داخل ربات: خاموش\nAI فقط برای بررسی و توضیح است.")
-
-
-def help_text():
-    return ("❓ راهنما\n\n/start — منوی اصلی\n/signal — انتخاب نماد\n/stats — عملکرد Paper\n/health — سلامت سرویس\n/help — راهنما\n\n"
-            "منو برای استفاده روزمره طراحی شده و همه عملیات حساس به حالت Paper محدود هستند.")
-
+    p=paper_status(); return ("🛡️ وضعیت ایمنی\n\nحالت: PAPER ONLY\nسفارش واقعی: خاموش\nبرداشت: متصل نیست\n" f"Daily loss limit: {p['daily_loss_limit_pct']}%\nKill Switch: {'🔴 فعال' if p['kill_switch'] else '🟢 آماده'}\n" "اصلاح خودکار کد از داخل ربات: خاموش\nAI فقط برای بررسی و توضیح است.")
+def help_text(): return ("❓ راهنما\n\n/start — منوی اصلی\n/signal — انتخاب نماد\n/stats — عملکرد Paper\n/health — سلامت سرویس\n/help — راهنما\n\n" "منو برای استفاده روزمره طراحی شده و همه عملیات حساس به حالت Paper محدود هستند.")
 
 async def start(update, context):
     if not authorized(update): return
     await update.message.reply_text("🛡️ Trading Guardian آماده است.\nحالت فعلی: PAPER TRADING", reply_markup=kb_main())
 
-
 async def send_signal(target, symbol):
     try:
-        s=await asyncio.to_thread(get_signal_snapshot, symbol); save_event("telegram_signal",s)
-        buttons=[]
+        s=await asyncio.to_thread(get_signal_snapshot, symbol); save_event("telegram_signal",s); buttons=[]
         if s.get("decision") in {"LONG","SHORT"} and not daily_risk_halted(): buttons.append(InlineKeyboardButton("📒 ثبت در Paper",callback_data=f"paperopen:{symbol}"))
-        buttons.append(InlineKeyboardButton("🔄 دوباره",callback_data=f"sig:{symbol}"))
-        buttons.append(InlineKeyboardButton("⬅️ بازار",callback_data="markets"))
+        buttons.append(InlineKeyboardButton("🔄 دوباره",callback_data=f"sig:{symbol}")); buttons.append(InlineKeyboardButton("⬅️ بازار",callback_data="markets"))
         await target.reply_text(format_signal(s),reply_markup=InlineKeyboardMarkup([buttons,[InlineKeyboardButton("🏠 خانه",callback_data="home")]]))
     except Exception as e: await target.reply_text(f"⚠️ خطا: {e}",reply_markup=kb_main())
-
 
 async def callback(update, context):
     q=update.callback_query
     if not authorized(update): return await q.answer()
     await q.answer(); data=q.data
-    if data=="home": return await q.edit_message_text(dashboard_text(),reply_markup=kb_main())
-    if data=="dashboard": return await q.edit_message_text(dashboard_text(),reply_markup=kb_main())
+    if data in {"home","dashboard"}: return await q.edit_message_text(dashboard_text(),reply_markup=kb_main())
     if data=="markets": return await q.edit_message_text(markets_text(),reply_markup=kb_symbols())
     if data=="stats": return await q.edit_message_text(stats_text(),reply_markup=kb_main())
     if data=="safety": return await q.edit_message_text(safety_text(),reply_markup=kb_main())
@@ -127,45 +99,30 @@ async def callback(update, context):
         symbol=data.split(":",1)[1]; s=await asyncio.to_thread(get_signal_snapshot,symbol); result=await asyncio.to_thread(paper_open,s,1.0)
         return await q.message.reply_text(("✅ در Paper ثبت شد.\n" if result.get("ok") else "⚠️ ثبت نشد: ") + (str(result.get("trade")) if result.get("ok") else result.get("reason","—")),reply_markup=kb_main())
 
-
 async def signal_cmd(update,context):
-    if not authorized(update): return
-    await update.message.reply_text("🟢 نماد را انتخاب کن:",reply_markup=kb_symbols())
-
+    if authorized(update): await update.message.reply_text("🟢 نماد را انتخاب کن:",reply_markup=kb_symbols())
 async def stats_cmd(update,context):
     if authorized(update): await update.message.reply_text(stats_text(),reply_markup=kb_main())
-
 async def health(update,context):
-    if not authorized(update): return
-    await update.message.reply_text("🟢 Bot process: OK\n🟢 Paper engine: available\n🟢 Live orders: DISABLED\n🟢 Withdrawals: DISABLED",reply_markup=kb_main())
-
+    if authorized(update): await update.message.reply_text("🟢 Bot process: OK\n🟢 Paper engine: available\n🟢 Live orders: DISABLED\n🟢 Withdrawals: DISABLED",reply_markup=kb_main())
 async def help_cmd(update,context):
     if authorized(update): await update.message.reply_text(help_text(),reply_markup=kb_main())
 
-
 async def monitor_loop(app):
     if not MONITOR_CHAT_ID: return
-    # Keep independent last-sent signatures per symbol; otherwise BTC/ETH/SOL
-    # would continuously look "changed" simply because another symbol ran next.
-    last_by_symbol = {}
+    last_by_symbol={}
     while True:
         try:
             for symbol in SYMBOLS:
-                s=await asyncio.to_thread(get_signal_snapshot,symbol)
-                sig=(symbol,s.get("decision"),s.get("entry"),s.get("stop"),s.get("tp1"),s.get("tp2"),s.get("tp3"))
+                s=await asyncio.to_thread(get_signal_snapshot,symbol); sig=(symbol,s.get("decision"),s.get("entry"),s.get("stop"),s.get("tp1"),s.get("tp2"),s.get("tp3"))
                 if s.get("decision")!="NO TRADE" and sig != last_by_symbol.get(symbol):
-                    await app.bot.send_message(chat_id=MONITOR_CHAT_ID,text=format_signal(s),reply_markup=kb_main())
-                    last_by_symbol[symbol] = sig
+                    await app.bot.send_message(chat_id=MONITOR_CHAT_ID,text=format_signal(s),reply_markup=kb_main()); last_by_symbol[symbol]=sig
                 save_event("monitor_tick",s)
-        except Exception as e:
-            save_event("monitor_error",{"error":str(e)})
+        except Exception as e: save_event("monitor_error",{"error":str(e)})
         await asyncio.sleep(MONITOR_INTERVAL)
 
 async def post_init(app): app.create_task(monitor_loop(app),name="market-monitor")
-
 def main():
     app=Application.builder().token(TOKEN).post_init(post_init).build()
-    app.add_handler(CommandHandler("start",start)); app.add_handler(CommandHandler("signal",signal_cmd)); app.add_handler(CommandHandler("stats",stats_cmd)); app.add_handler(CommandHandler("health",health)); app.add_handler(CommandHandler("help",help_cmd)); app.add_handler(CallbackQueryHandler(callback))
-    app.run_polling(drop_pending_updates=True)
-
+    app.add_handler(CommandHandler("start",start)); app.add_handler(CommandHandler("signal",signal_cmd)); app.add_handler(CommandHandler("stats",stats_cmd)); app.add_handler(CommandHandler("health",health)); app.add_handler(CommandHandler("help",help_cmd)); app.add_handler(CallbackQueryHandler(callback)); app.run_polling(drop_pending_updates=True)
 if __name__=="__main__": main()
