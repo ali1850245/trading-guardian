@@ -32,10 +32,9 @@ class BuildSignalTests(unittest.TestCase):
     def test_expected_timeframe_hierarchy_exists(self):
         self.assertEqual(
             tuple(TIMEFRAMES.keys()),
-            ("5m", "10m", "15m", "30m", "1h", "4h", "1d", "2d"),
+            ("5m", "10m", "15m", "30m", "1h", "4h", "1d"),
         )
         self.assertEqual(TIMEFRAMES["1d"]["role"], "macro")
-        self.assertEqual(TIMEFRAMES["2d"]["role"], "macro")
         self.assertEqual(TIMEFRAMES["10m"]["role"], "trigger")
 
     def test_long_has_targets(self):
@@ -110,7 +109,6 @@ class BuildSignalTests(unittest.TestCase):
     def test_macro_structure_conflict_blocks_trade(self):
         analyses = self.all_bullish()
         analyses["1d"] = self.analysis(-4)
-        analyses["2d"] = self.analysis(-4)
         analyses["1h"] = self.analysis(4)
         analyses["4h"] = self.analysis(4)
         result = build_signal(
