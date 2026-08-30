@@ -1,8 +1,7 @@
 """Execution boundary for Trading Guardian.
 
-The repository remains paper-only.  This module makes the execution boundary
-explicit so signal generation is separated from order execution without
-containing live exchange-order placement code.
+The repository remains paper-only. This module separates signal generation
+from exchange execution and keeps live order placement disabled.
 """
 from __future__ import annotations
 
@@ -23,10 +22,10 @@ class ExecutionBlocked(RuntimeError):
 
 @dataclass(frozen=True)
 class OrderIntent:
-    """Normalized order intent produced from a validated signal.
+    """Normalized, exchange-neutral order intent for simulation.
 
-    This is deliberately exchange-neutral.  It does not contain credentials,
-    signatures, or an exchange request implementation.
+    Leverage is a paper-scenario parameter only. This object contains no
+    credentials, signatures, or exchange request implementation.
     """
 
     symbol: str
@@ -37,6 +36,7 @@ class OrderIntent:
     tp1: float | None = None
     tp2: float | None = None
     tp3: float | None = None
+    leverage: float = 1.0
     signal_id: str | None = None
 
     def validate(self) -> None:
@@ -46,6 +46,8 @@ class OrderIntent:
             raise ValueError("symbol is required")
         if self.quantity <= 0:
             raise ValueError("quantity must be positive")
+        if self.leverage < 1 or self.leverage > 100:
+            raise ValueError("paper leverage must be between 1x and 100x")
         if self.entry <= 0 or self.stop <= 0:
             raise ValueError("entry and stop must be positive")
         if self.side == "LONG" and self.stop >= self.entry:
@@ -80,7 +82,7 @@ class PaperExecutionAdapter:
 
     def submit(self, intent: OrderIntent) -> dict[str, Any]:
         intent.validate()
-        key = intent.signal_id or f"{intent.symbol}:{intent.side}:{intent.entry}:{intent.quantity}"
+        key = intent.signal_id or f"{intent.symbol}:{intent.side}:{intent.entry}:{intent.quantity}:{intent.leverage}"
         if key in self._seen:
             return {"ok": False, "mode": self.mode.value, "reason": "duplicate paper intent", "idempotent": True}
         self._seen.add(key)
@@ -94,7 +96,7 @@ class PaperExecutionAdapter:
 
 
 class LiveExecutionAdapter:
-    """Explicit disabled boundary; it intentionally cannot place live orders."""
+    """Explicit disabled boundary; it cannot place live orders."""
 
     mode = ExecutionMode.LIVE_DISABLED
 
@@ -106,8 +108,8 @@ class LiveExecutionAdapter:
         )
 
 
-def intent_from_signal(signal: Mapping[str, Any], quantity: float) -> OrderIntent:
-    """Convert a LONG/SHORT signal into a validated, exchange-neutral intent."""
+def intent_from_signal(signal: Mapping[str, Any], quantity: float, leverage: float = 1.0) -> OrderIntent:
+    """Convert a LONG/SHORT signal into a validated paper order intent."""
     decision = str(signal.get("decision", "NO TRADE")).upper()
     if decision not in {"LONG", "SHORT"}:
         raise ValueError("signal is not executable: expected LONG or SHORT")
@@ -120,6 +122,7 @@ def intent_from_signal(signal: Mapping[str, Any], quantity: float) -> OrderInten
         tp1=float(signal["tp1"]) if signal.get("tp1") is not None else None,
         tp2=float(signal["tp2"]) if signal.get("tp2") is not None else None,
         tp3=float(signal["tp3"]) if signal.get("tp3") is not None else None,
+        leverage=float(leverage),
         signal_id=str(signal.get("signal_id")) if signal.get("signal_id") else None,
     )
     intent.validate()
