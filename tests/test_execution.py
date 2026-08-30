@@ -17,17 +17,19 @@ class ExecutionBoundaryTests(unittest.TestCase):
         }
 
     def test_long_intent_validates(self):
-        intent = intent_from_signal(self.signal("LONG"), 0.5)
+        intent = intent_from_signal(self.signal("LONG"), 0.5, leverage=3)
         self.assertEqual(intent.side, "LONG")
         self.assertEqual(intent.quantity, 0.5)
+        self.assertEqual(intent.leverage, 3)
 
     def test_short_intent_validates(self):
-        intent = intent_from_signal(self.signal("SHORT"), 0.5)
+        intent = intent_from_signal(self.signal("SHORT"), 0.5, leverage=2)
         self.assertEqual(intent.side, "SHORT")
+        self.assertEqual(intent.leverage, 2)
 
     def test_paper_adapter_is_idempotent(self):
         adapter = PaperExecutionAdapter()
-        intent = intent_from_signal(self.signal(), 1.0)
+        intent = intent_from_signal(self.signal(), 1.0, leverage=3)
         first = adapter.submit(intent)
         second = adapter.submit(intent)
         self.assertTrue(first["ok"])
@@ -37,7 +39,7 @@ class ExecutionBoundaryTests(unittest.TestCase):
     def test_live_adapter_is_disabled(self):
         adapter = LiveExecutionAdapter()
         with self.assertRaises(ExecutionBlocked):
-            adapter.submit(intent_from_signal(self.signal(), 1.0))
+            adapter.submit(intent_from_signal(self.signal(), 1.0, leverage=3))
 
     def test_invalid_direction_is_rejected(self):
         bad = self.signal("NO TRADE")
@@ -47,6 +49,12 @@ class ExecutionBoundaryTests(unittest.TestCase):
     def test_invalid_quantity_is_rejected(self):
         with self.assertRaises(ValueError):
             intent_from_signal(self.signal(), 0)
+
+    def test_invalid_paper_leverage_is_rejected(self):
+        with self.assertRaises(ValueError):
+            intent_from_signal(self.signal(), 1.0, leverage=0)
+        with self.assertRaises(ValueError):
+            intent_from_signal(self.signal(), 1.0, leverage=101)
 
 
 if __name__ == "__main__":
