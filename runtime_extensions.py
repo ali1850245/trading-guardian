@@ -4,6 +4,7 @@ from __future__ import annotations
 import engine
 
 _original_get_candles = engine.get_candles
+_original_timeframe_analysis = engine.timeframe_analysis
 _original_higher_context = engine.higher_timeframe_context
 
 
@@ -23,7 +24,7 @@ def get_candles(symbol=engine.DEFAULT_SYMBOL, resolution="15", limit=300):
 
 
 def timeframe_analysis(df):
-    base = engine.timeframe_analysis(df)
+    base = _original_timeframe_analysis(df)
     x = df.iloc[-1]
     close = float(x["close"])
     volume = float(x.get("volume", 0) or 0)
@@ -33,14 +34,10 @@ def timeframe_analysis(df):
     hh = float(df["high"].rolling(20).max().iloc[-1])
     ll = float(df["low"].rolling(20).min().iloc[-1])
     structure = "range"
-    if close >= hh:
-        structure = "breakout_up"
-    elif close <= ll:
-        structure = "breakdown"
-    elif close > vwap:
-        structure = "above_vwap"
-    elif close < vwap:
-        structure = "below_vwap"
+    if close >= hh: structure = "breakout_up"
+    elif close <= ll: structure = "breakdown"
+    elif close > vwap: structure = "above_vwap"
+    elif close < vwap: structure = "below_vwap"
     base["vwap20"] = vwap
     base["market_structure"] = structure
     base["regime"] = "trend_up" if base.get("score", 0) >= 3 else "trend_down" if base.get("score", 0) <= -3 else "range"
@@ -56,14 +53,10 @@ def higher_timeframe_context(analyses):
     direction = engine._direction
     macro_dir = direction(sum(macro) / len(macro), 2) if macro else 0
     structure_dir = direction(sum(structure) / len(structure), 2) if structure else 0
-    if macro_dir and structure_dir and macro_dir == structure_dir:
-        bias = macro_dir
-    elif macro_dir and not structure_dir:
-        bias = macro_dir
-    elif structure_dir and not macro_dir:
-        bias = structure_dir
-    else:
-        bias = 0
+    if macro_dir and structure_dir and macro_dir == structure_dir: bias = macro_dir
+    elif macro_dir and not structure_dir: bias = macro_dir
+    elif structure_dir and not macro_dir: bias = structure_dir
+    else: bias = 0
     return {"macro_direction": macro_dir, "structure_direction": structure_dir, "bias": bias,
             "macro_score": round(sum(macro) / len(macro), 3) if macro else 0,
             "structure_score": round(sum(structure) / len(structure), 3) if structure else 0,
