@@ -3,10 +3,8 @@ from __future__ import annotations
 
 import engine
 
-
-# The public APIs used by the core engine do not natively provide 2-day candles.
-# Build them from closed daily candles instead of pretending an unsupported API interval exists.
 _original_get_candles = engine.get_candles
+_original_higher_context = engine.higher_timeframe_context
 
 
 def get_candles(symbol=engine.DEFAULT_SYMBOL, resolution="15", limit=300):
@@ -17,15 +15,11 @@ def get_candles(symbol=engine.DEFAULT_SYMBOL, resolution="15", limit=300):
         raise RuntimeError("Not enough daily candles for 2d aggregation")
     frame = daily.copy().reset_index(drop=True)
     frame["group"] = frame.index // 2
-    out = frame.groupby("group", sort=True).agg(
-        timestamp=("timestamp", "first"),
-        open=("open", "first"),
-        high=("high", "max"),
-        low=("low", "min"),
-        close=("close", "last"),
+    return frame.groupby("group", sort=True).agg(
+        timestamp=("timestamp", "first"), open=("open", "first"),
+        high=("high", "max"), low=("low", "min"), close=("close", "last"),
         volume=("volume", "sum"),
-    ).reset_index(drop=True)
-    return out.tail(limit).reset_index(drop=True)
+    ).reset_index(drop=True).tail(limit).reset_index(drop=True)
 
 
 def timeframe_analysis(df):
@@ -39,9 +33,9 @@ def timeframe_analysis(df):
     hh = float(df["high"].rolling(20).max().iloc[-1])
     ll = float(df["low"].rolling(20).min().iloc[-1])
     structure = "range"
-    if close > hh * 0.995:
+    if close >= hh:
         structure = "breakout_up"
-    elif close < ll * 1.005:
+    elif close <= ll:
         structure = "breakdown"
     elif close > vwap:
         structure = "above_vwap"
@@ -54,15 +48,33 @@ def timeframe_analysis(df):
     return base
 
 
-# Add the advertised 2d macro context and use the richer analysis for bot requests.
+def higher_timeframe_context(analyses):
+    macro_names = ("2d", "1d")
+    structure_names = ("1h", "4h")
+    macro = [analyses.get(x, {}).get("score", 0) for x in macro_names if not analyses.get(x, {}).get("error")]
+    structure = [analyses.get(x, {}).get("score", 0) for x in structure_names if not analyses.get(x, {}).get("error")]
+    direction = engine._direction
+    macro_dir = direction(sum(macro) / len(macro), 2) if macro else 0
+    structure_dir = direction(sum(structure) / len(structure), 2) if structure else 0
+    if macro_dir and structure_dir and macro_dir == structure_dir:
+        bias = macro_dir
+    elif macro_dir and not structure_dir:
+        bias = macro_dir
+    elif structure_dir and not macro_dir:
+        bias = structure_dir
+    else:
+        bias = 0
+    return {"macro_direction": macro_dir, "structure_direction": structure_dir, "bias": bias,
+            "macro_score": round(sum(macro) / len(macro), 3) if macro else 0,
+            "structure_score": round(sum(structure) / len(structure), 3) if structure else 0,
+            "macro_timeframes": list(macro_names), "structure_timeframes": list(structure_names)}
+
+
 if "2d" not in engine.TIMEFRAMES:
     engine.TIMEFRAMES = {
-        "5m": engine.TIMEFRAMES["5m"],
-        "10m": engine.TIMEFRAMES["10m"],
-        "15m": engine.TIMEFRAMES["15m"],
-        "30m": engine.TIMEFRAMES["30m"],
-        "1h": engine.TIMEFRAMES["1h"],
-        "4h": engine.TIMEFRAMES["4h"],
+        "5m": engine.TIMEFRAMES["5m"], "10m": engine.TIMEFRAMES["10m"],
+        "15m": engine.TIMEFRAMES["15m"], "30m": engine.TIMEFRAMES["30m"],
+        "1h": engine.TIMEFRAMES["1h"], "4h": engine.TIMEFRAMES["4h"],
         "1d": engine.TIMEFRAMES["1d"],
         "2d": {"resolution": "2D", "minutes": 2880, "weight": 7, "role": "macro"},
     }
@@ -70,3 +82,4 @@ if "2d" not in engine.TIMEFRAMES:
 
 engine.get_candles = get_candles
 engine.timeframe_analysis = timeframe_analysis
+engine.higher_timeframe_context = higher_timeframe_context
