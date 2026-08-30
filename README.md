@@ -2,6 +2,16 @@
 
 Telegram-first **paper-trading and market-analysis** bot. Live orders and withdrawals are disabled.
 
+## Unified project architecture
+
+The `main` branch is the single active project. Legacy prototypes/archives are not separate applications and are not used as runtime code.
+
+The active flow is:
+
+`Robot -> Market Data -> Analysis -> LONG/SHORT/NO TRADE -> Targets -> Risk Management -> Order Builder -> Live Adapter [DISABLED] -> Paper Trading -> Journal/Performance`
+
+The implementation keeps the decision engine independent from execution. `execution.py` contains the exchange-neutral `OrderIntent` (the Order Builder boundary), an active `PaperExecutionAdapter`, and an explicitly disabled `LiveExecutionAdapter`. The disabled adapter cannot submit a live exchange order.
+
 ## Included
 
 - BTCUSDT, ETHUSDT and SOLUSDT market selection
@@ -16,19 +26,40 @@ Telegram-first **paper-trading and market-analysis** bot. Live orders and withdr
 - LONG / SHORT / NO TRADE decision gate with minimum data requirements, timeframe alignment and conflict blocking
 - Entry, SL, TP1, TP2, TP3 and R:R calculations for simulation only
 - Scenario invalidation text and change monitoring
+- Risk checks and configurable daily paper-loss Kill Switch
+- Exchange-neutral order intents with validation and duplicate protection
 - Paper Trading journal, Win Rate, Profit Factor and PnL
-- Configurable daily paper-loss Kill Switch
 - OpenAI independent review through the Responses API
 - Telegram inline menu for Dashboard, Markets, Signal, AI Review, Paper Trading, Performance, Safety, Settings and Help
 - JSONL audit journal for generated signals and system events
-- Explicit execution boundary in `execution.py`: normalized order intents, paper execution, idempotency and a disabled live boundary
 - CI compilation, import and unit-test pipeline
+- Execution-boundary tests covering LONG/SHORT validation, invalid signals, quantity validation, paper idempotency and disabled live execution
 
-## Execution architecture
+## Execution layers
 
-`Market Data -> Analysis -> LONG/SHORT/NO TRADE -> Targets -> Risk checks -> Order Intent -> Paper Execution -> Journal/Performance`
+### 1. Analysis
 
-`execution.py` keeps the exchange-execution boundary explicit without implementing live order placement. `PaperExecutionAdapter` is the active adapter. `LiveExecutionAdapter` is intentionally disabled and raises an execution-blocked error instead of sending an exchange request.
+Market data is collected from the configured public adapters. The engine calculates multi-timeframe indicators and market context, then applies the signal decision gates. Weak, conflicting or insufficient setups become `NO TRADE`.
+
+### 2. LONG / SHORT and targets
+
+A valid directional signal produces an entry, stop, up to three targets and R:R values. The signal remains advisory until it passes the risk checks.
+
+### 3. Risk Management
+
+Paper risk controls include minimum-data checks, spread checks, timeframe conflict blocking and the configurable daily paper-loss Kill Switch. Risk checks can reject a setup instead of forcing an order.
+
+### 4. Order Builder
+
+`intent_from_signal()` converts a validated LONG/SHORT signal into an exchange-neutral `OrderIntent`. It validates side, symbol, quantity, entry, stop and targets before execution.
+
+### 5. Live Adapter — DISABLED
+
+`LiveExecutionAdapter` is a deliberate execution boundary. It validates the intent and then raises `ExecutionBlocked`; it contains no exchange request, credential handling, signing, or live-order placement.
+
+### 6. Paper Trading
+
+`PaperExecutionAdapter` is the active execution path. It records simulated orders, prevents duplicate intents, and feeds the paper journal/performance layer.
 
 ## Safety boundary
 
