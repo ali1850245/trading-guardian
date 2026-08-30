@@ -6,13 +6,13 @@ Telegram-first **paper-trading and market-analysis** bot. Live orders and withdr
 
 - BTCUSDT, ETHUSDT and SOLUSDT market selection
 - Wallex primary market adapter with Binance public-data fallback
-- Multi-timeframe analysis: **5m / 10m / 15m / 30m / 1h / 4h / 1d / 2d**
-- Hierarchical timeframe logic: 2d/1d macro context -> 4h/1h structure -> 30m/15m setup -> 10m/5m trigger
+- Multi-timeframe analysis: **5m / 10m / 15m / 30m / 1h / 4h / 1d**
+- Hierarchical timeframe logic: 1d macro context -> 4h/1h structure -> 30m/15m setup -> 10m/5m trigger
 - Higher timeframes inform lower timeframes; they do not blindly force a direction
 - Closed-candle analysis to reduce intrabar signal churn
 - EMA20 / EMA50 / EMA200, RSI, MACD, ATR, volume and momentum
 - Order Book imbalance, spread and recent trade flow
-- Futures context: funding rate, open interest and recent liquidation data when public endpoints are available
+- Futures context: funding rate and open interest when public endpoints are available
 - LONG / SHORT / NO TRADE decision gate with minimum data requirements, timeframe alignment and conflict blocking
 - Entry, SL, TP1, TP2, TP3 and R:R calculations for simulation only
 - Scenario invalidation text and change monitoring
@@ -21,7 +21,14 @@ Telegram-first **paper-trading and market-analysis** bot. Live orders and withdr
 - OpenAI independent review through the Responses API
 - Telegram inline menu for Dashboard, Markets, Signal, AI Review, Paper Trading, Performance, Safety, Settings and Help
 - JSONL audit journal for generated signals and system events
+- Explicit execution boundary in `execution.py`: normalized order intents, paper execution, idempotency and a disabled live boundary
 - CI compilation, import and unit-test pipeline
+
+## Execution architecture
+
+`Market Data -> Analysis -> LONG/SHORT/NO TRADE -> Targets -> Risk checks -> Order Intent -> Paper Execution -> Journal/Performance`
+
+`execution.py` keeps the exchange-execution boundary explicit without implementing live order placement. `PaperExecutionAdapter` is the active adapter. `LiveExecutionAdapter` is intentionally disabled and raises an execution-blocked error instead of sending an exchange request.
 
 ## Safety boundary
 
@@ -56,7 +63,7 @@ The engine uses public market data and keeps AI review advisory. No model output
 
 The engine deliberately separates context from timing:
 
-1. **2d + 1d:** macro direction and broad market bias.
+1. **1d:** macro direction and broad market bias.
 2. **4h + 1h:** market structure and confirmation.
 3. **30m + 15m:** setup quality.
 4. **10m + 5m:** entry timing/trigger context.
@@ -67,6 +74,6 @@ If macro and structure directly conflict, the engine returns `NO TRADE`. If lowe
 
 The engine can fall back between public market-data sources. A missing derivatives endpoint never becomes invented data; the field stays unavailable. Weak, conflicting or insufficient setups become `NO TRADE` rather than being forced into a direction.
 
-Two-day candles are constructed from daily public candles when a native 2d endpoint is not available. The engine uses closed candles for analysis where possible.
+The engine uses closed candles for analysis where possible.
 
 Before relying on any strategy for real-world decisions, it should be independently tested on historical and out-of-sample data. This project is a software/paper-trading experiment, not a guarantee of market outcomes.
