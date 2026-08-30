@@ -4,7 +4,7 @@
 
 - [x] Telegram dashboard and inline navigation
 - [x] BTCUSDT / ETHUSDT / SOLUSDT selection
-- [x] 5m / 10m / 15m / 30m / 1h / 4h / 1d / 2d multi-timeframe analysis
+- [x] 5m / 10m / 15m / 30m / 1h / 4h / 1d multi-timeframe analysis
 - [x] Hierarchy: macro -> structure -> setup -> trigger
 - [x] Higher-timeframe context informs lower-timeframe timing without blindly forcing direction
 - [x] Closed-candle analysis to reduce intrabar churn
@@ -13,14 +13,18 @@
 - [x] Order Book imbalance and spread guard
 - [x] Recent trade-flow context
 - [x] Wallex primary data with Binance public fallback
-- [x] Funding rate / Open Interest / recent liquidation context when available
+- [x] Funding rate / Open Interest context when available
 - [x] LONG / SHORT / NO TRADE gate with minimum data, timeframe alignment and macro/structure conflict blocking
 - [x] Entry / SL / TP1 / TP2 / TP3 and R:R for Paper simulation
 - [x] Scenario invalidation and per-symbol monitoring notifications
 - [x] Paper journal, Win Rate, Profit Factor and PnL
 - [x] Daily loss Kill Switch
 - [x] OpenAI independent review
-- [x] CI compile/import/unit tests updated for the current engine API
+- [x] Explicit execution boundary (`execution.py`)
+- [x] Exchange-neutral `OrderIntent` validation
+- [x] Paper execution adapter with duplicate-intent protection
+- [x] Explicit disabled live boundary that cannot place orders
+- [x] CI compile/import/unit-test coverage for the execution boundary
 - [x] No live order placement
 - [x] No withdrawal functionality
 
