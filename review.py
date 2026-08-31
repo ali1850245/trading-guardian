@@ -28,7 +28,7 @@ def review_with_ai(client, snapshot):
     model = os.getenv("OPENAI_MODEL", "gpt-5.6").strip() or "gpt-5.6"
 
     try:
-        response = client.responses.create(
+        response = client.with_options(timeout=30.0, max_retries=1).responses.create(
             model=model,
             input=[
                 {
